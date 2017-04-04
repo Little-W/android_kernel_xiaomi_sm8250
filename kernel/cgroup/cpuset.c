@@ -2188,7 +2188,7 @@ static void cpuset_fork(struct task_struct *task)
 		set_cpus_allowed_ptr(task, &current->pkg.migt.cpus_allowed);
 	else
 #endif
-	set_cpus_allowed_ptr(task, &current->cpus_allowed);
+	set_cpus_allowed_ptr(task, current->cpus_ptr);
 	task->mems_allowed = current->mems_allowed;
 }
 
