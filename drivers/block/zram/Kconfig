@@ -89,3 +89,8 @@ config MIUI_ZRAM_MEMORY_TRACKING
 	  /sys/block/zramX/.
 
 	  See Documentation/blockdev/zram.txt for more information.
+
+config ZRAM_SIZE_OVERRIDE
+	int "zram size to set from kernel"
+	range 0 8
+	default 0
