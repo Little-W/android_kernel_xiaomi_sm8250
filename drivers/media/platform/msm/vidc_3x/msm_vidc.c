@@ -1259,8 +1259,10 @@ void *msm_vidc_open(int core_id, int session_type)
 		goto err_invalid_core;
 	}
 
+#ifdef CONFIG_DEBUG_KERNEL
 	pr_info(VIDC_DBG_TAG "Opening video instance: %pK, %d\n",
 		VIDC_MSG_PRIO2STRING(VIDC_INFO), inst, session_type);
+#endif
 	mutex_init(&inst->sync_lock);
 	mutex_init(&inst->bufq[CAPTURE_PORT].lock);
 	mutex_init(&inst->bufq[OUTPUT_PORT].lock);
