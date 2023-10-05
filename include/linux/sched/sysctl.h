@@ -34,7 +34,6 @@ extern unsigned int sysctl_boost_stask_to_big;
 #endif
 extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
-extern unsigned int sysctl_sched_force_lb_enable;
 #ifdef CONFIG_SCHED_WALT
 extern unsigned int sysctl_sched_capacity_margin_up[MAX_MARGIN_LEVELS];
 extern unsigned int sysctl_sched_capacity_margin_down[MAX_MARGIN_LEVELS];
@@ -42,6 +41,7 @@ extern unsigned int sysctl_sched_user_hint;
 extern const int sched_user_hint_max;
 extern unsigned int sysctl_sched_cpu_high_irqload;
 extern unsigned int sysctl_sched_boost;
+extern unsigned int sysctl_sched_force_lb_enable;
 #ifdef CONFIG_MIHW
 extern unsigned int sysctl_sched_boost_top_app;
 #endif
