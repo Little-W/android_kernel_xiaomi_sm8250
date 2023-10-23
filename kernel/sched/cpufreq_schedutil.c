@@ -472,7 +472,7 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 	else
 		sg_policy->need_freq_update = true;
 #else
-	freq = map_util_freq(util, freq, max);
+	freq = map_util_freq(util, freq, max, policy->cpu);
 #endif
 	do_freq_limit(sg_policy, &freq, time);
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
