@@ -335,6 +335,51 @@ config CPU_FREQ_IDLE_PRIME
 	  If in doubt, say 0 to use the hardware's minimum frequency.
 
 endif
+if CPU_FREQ_GOV_SCHEDUTIL
+
+
+config SCHEDUTIL_UP_RATE_LIMIT_LP
+	int "Default up rate-limit for schedutil"
+	default 0
+	help
+	  This sets schedutil's default frequency up rate-limit of
+	  lp cluster in microseconds.
+
+config SCHEDUTIL_DOWN_RATE_LIMIT_LP
+	int "Default down rate-limit for schedutil"
+	default 0
+	help
+	  This sets schedutil's default frequency down rate-limit of
+	  lp cluster in microseconds.
+	  
+config SCHEDUTIL_UP_RATE_LIMIT_PERF
+	int "Default up rate-limit for schedutil"
+	default 0
+	help
+	  This sets schedutil's default frequency up rate-limit of
+	  perf cluster in microseconds.
+
+config SCHEDUTIL_DOWN_RATE_LIMIT_PERF
+	int "Default down rate-limit for schedutil"
+	default 0
+	help
+	  This sets schedutil's default frequency down rate-limit of
+	  perf cluster in microseconds.
+
+config SCHEDUTIL_UP_RATE_LIMIT_PRIME
+	int "Default up rate-limit for schedutil"
+	default 0
+	help
+	  This sets schedutil's default frequency up rate-limit of
+	  prime cluster in microseconds.
+
+config SCHEDUTIL_DOWN_RATE_LIMIT_PRIME
+	int "Default down rate-limit for schedutil"
+	default 0
+	help
+	  This sets schedutil's default frequency down rate-limit of
+	  prime cluster in microseconds.
+endif
 
 comment "CPU frequency scaling drivers"
 
