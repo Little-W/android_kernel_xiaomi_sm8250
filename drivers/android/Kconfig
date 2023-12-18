@@ -60,6 +60,14 @@ config BINDER_OPT
 	---help---
 	  Mark important binder calls from ui thread.
 
+config HWUI_MONITOR
+	bool "Android hwui frame time monitor"
+	depends on UPROBES
+	default n
+	help
+	  This is a kernel-based monitor to obtain the frame generation
+	  time of Android apps using uprobe in linux kernel. 
+	  
 endif # if ANDROID
 
 endmenu
