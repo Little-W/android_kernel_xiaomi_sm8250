@@ -58,6 +58,8 @@
 #define CREATE_TRACE_POINTS
 #include "sde_trace.h"
 
+#include <linux/frame_monitor.h>
+
 /* defines for secure channel call */
 #define MEM_PROTECT_SD_CTRL_SWITCH 0x18
 #define MDP_DEVICE_ID            0x1A
@@ -918,6 +920,7 @@ static void _sde_kms_drm_check_dpms(struct drm_atomic_state *old_state,
 			continue;
 
 		new_fps = crtc->state->mode.vrefresh;
+		vrefresh_stat(new_fps);
 		new_mode = _sde_kms_get_blank(crtc->state, connector->state);
 		if (old_conn_state->crtc) {
 			old_crtc_state = drm_atomic_get_existing_crtc_state(
