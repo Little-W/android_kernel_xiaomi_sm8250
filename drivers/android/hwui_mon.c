@@ -88,6 +88,8 @@ static int hwui_inject2_handler(
 	list_for_each_entry(receiver, &receivers, list) {
 		if (ui_frame_time >= receiver->jank_frame_time)
 			receiver->jank_callback(ui_frame_time, cur_time);
+		else
+			receiver->fluid_callback(ui_frame_time, cur_time);
 	}
 	up_read(&receiver_lock);
 

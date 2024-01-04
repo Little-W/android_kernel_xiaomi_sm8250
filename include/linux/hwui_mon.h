@@ -19,6 +19,7 @@ struct hwui_mon_receiver {
 	 * block the UI thread and lead to extra janks.
 	 */
 	hwui_frame_handler jank_callback;
+	hwui_frame_handler fluid_callback;
 };
 
 void hwui_mon_handle_exec(struct filename *);
