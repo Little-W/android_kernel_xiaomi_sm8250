@@ -1437,6 +1437,11 @@ struct task_struct {
 	unsigned int			cpux;
 #endif
 
+#ifdef CONFIG_SIMPLE_FAS
+	bool 					fas_boosted;
+	bool 					fas_critical_task;
+#endif
+
 #ifdef CONFIG_KASAN
 	unsigned int			kasan_depth;
 #endif
@@ -2329,6 +2334,9 @@ static inline void set_wake_up_idle(bool enabled)
 		current->flags &= ~PF_WAKE_UP_IDLE;
 }
 
+#ifdef CONFIG_SIMPLE_FAS
+extern inline bool is_fas_critical_task(struct task_struct *p);
+#endif
 #if IS_ENABLED(CONFIG_MIHW)
 extern inline bool is_critical_task(struct task_struct *p);
 

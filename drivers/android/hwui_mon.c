@@ -12,6 +12,7 @@
 #include <linux/uaccess.h>
 #include <linux/uprobes.h>
 #include <linux/moduleparam.h>
+#include <linux/sched/simple_fas.h>
 
 #define ZYGOTE_PATH "/system/bin/app_process64"
 #define HWUI_PATH "/system/lib64/libhwui.so"
@@ -21,7 +22,9 @@
 #define CHECKSUM_BUF_SIZE 1024
 
 static bool supported = false;
+static bool enabled = true;
 module_param(supported, bool, 0444);
+module_param(enabled, bool, 0644);
 static struct {
 	// sha1sum of libhwui.so
 	char checksum[SHA1_DIGEST_SIZE * 2 + 1];
@@ -157,22 +160,24 @@ static int hwui_inject2_handler(
 	struct hwui_mon_receiver *receiver;
 	ktime_t cur_time;
 	int ret;
+	if(enabled)
+	{
+		ret = copy_from_user(buf, current->ui_frame_info, sizeof(buf));
+		if (ret)
+			goto error;
 
-	ret = copy_from_user(buf, current->ui_frame_info, sizeof(buf));
-	if (ret)
-		goto error;
+		cur_time = ktime_get();
+		ui_frame_time = ktime_sub(cur_time, VSYNC_TIME(buf)) / NSEC_PER_USEC;
 
-	cur_time = ktime_get();
-	ui_frame_time = ktime_sub(cur_time, VSYNC_TIME(buf)) / NSEC_PER_USEC;
-
-	down_read(&receiver_lock);
-	list_for_each_entry(receiver, &receivers, list) {
-		if (ui_frame_time >= receiver->jank_frame_time)
-			receiver->callback_handler(ui_frame_time, cur_time, IS_JANK);
-		else
-			receiver->callback_handler(ui_frame_time, cur_time, IS_FLUID);
+		down_read(&receiver_lock);
+		list_for_each_entry(receiver, &receivers, list) {
+			if (ui_frame_time >= receiver->jank_frame_time)
+				receiver->callback_handler(ui_frame_time, cur_time, IS_JANK);
+			else
+				receiver->callback_handler(ui_frame_time, cur_time, IS_FLUID);
+		}
+		up_read(&receiver_lock);
 	}
-	up_read(&receiver_lock);
 
 	return 0;
 error:

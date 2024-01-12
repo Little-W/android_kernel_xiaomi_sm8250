@@ -10,7 +10,7 @@
 #include <linux/timekeeping.h>
 #include <linux/list.h>
 
-#define TIMER_INTERVAL_US 333333
+#define TIMER_INTERVAL_US 1000000
 
 #define FRAME_TIME_144HZ_US 6944
 #define FRAME_TIME_120HZ_US 8333
@@ -18,16 +18,13 @@
 #define FRAME_TIME_60HZ_US 16666
 
 #define COMMIT_START_TS 1
-#define COMMIT_END_TS 2
+#define COMMIT_COMPLETE_TS 2
 #define INPUT_FENCE_TS 3
-#define COMMIT_RENDER_COMPLETE_TS 4
+#define RENDER_COMPLETE_TS 4
+#define VBLANK_WAIT_START_TS 5
+#define VBLANK_WAIT_END_TS 6
 
-#define FPS_UPDATED 1
-#define IS_JANK 2
-#define IS_FLUID 3
-#define IDLE 4
-
-typedef void (*frame_time_handler)(u16 fps, u32 frame_generation_time,
+typedef void (*frame_time_handler)(u16 fps, u32 frame_time,
 				   ktime_t cur_time, u8 mode);
 
 struct frame_mon_receiver {
@@ -37,7 +34,6 @@ struct frame_mon_receiver {
 };
 
 typedef struct fps_mon_info {
-    bool start;
     u16 frame_count;
     u16 fps;
     int cur_vrefresh;
@@ -45,6 +41,7 @@ typedef struct fps_mon_info {
     ktime_t render_end_ts;
     ktime_t last_commit_end_ts;
     u32 frame_time;
+    bool idle_state;
 } fps_mon_info_t;
 
 extern fps_mon_info_t fps_info;

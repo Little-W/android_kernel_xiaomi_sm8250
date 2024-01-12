@@ -7,8 +7,6 @@
 #include <linux/fs.h>
 #include <linux/list.h>
 
-#define IS_JANK 1
-#define IS_FLUID 2
 typedef void (*hwui_frame_handler)
         (int ui_frame_time, ktime_t cur_time, u8 mode);
 

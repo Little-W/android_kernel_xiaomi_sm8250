@@ -511,6 +511,8 @@ static void complete_commit(struct msm_commit *c)
 
 	msm_atomic_helper_commit_modeset_enables(dev, state);
 
+	frame_stat(RENDER_COMPLETE_TS);
+	
 	/* NOTE: _wait_for_vblanks() only waits for vblank on
 	 * enabled CRTCs.  So we end up faulting when disabling
 	 * due to (potentially) unref'ing the outgoing fb's
@@ -526,8 +528,6 @@ static void complete_commit(struct msm_commit *c)
 
 	msm_atomic_wait_for_commit_done(dev, state);
 
-	frame_stat(COMMIT_RENDER_COMPLETE_TS);
-
 	drm_atomic_helper_cleanup_planes(dev, state);
 
 	kms->funcs->complete_commit(kms, state);
@@ -536,7 +536,7 @@ static void complete_commit(struct msm_commit *c)
 
 	commit_destroy(c);
 
-	frame_stat(COMMIT_END_TS);
+	frame_stat(COMMIT_COMPLETE_TS);
 }
 
 static void _msm_drm_commit_work_cb(struct kthread_work *work)

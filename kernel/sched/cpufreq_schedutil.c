@@ -19,6 +19,11 @@
 #include <linux/sched/sysctl.h>
 #include <misc/lyb_taskmmu.h>
 #include <linux/kprofiles.h>
+#include <linux/hwui_mon.h>
+#include <linux/devfreq_boost.h>
+#include <linux/moduleparam.h>
+#include <linux/sched/simple_fas.h>
+#include <linux/spinlock_types.h>
 
 /* Target load. Lower values result in higher CPU speeds. */
 #define DEFAULT_TARGET_LOAD_LP 70
@@ -51,6 +56,7 @@ static unsigned int default_hispeed_freq_hp = CONFIG_SCHEDUTIL_DEFAULT_HIGHSPEED
 
 static unsigned int default_hispeed_freq_pr = CONFIG_SCHEDUTIL_DEFAULT_HIGHSPEED_FREQ_PR;
 
+
 struct sugov_tunables {
 	struct gov_attr_set	attr_set;
 	unsigned int		up_rate_limit_us;
@@ -69,6 +75,22 @@ struct sugov_tunables {
 	int 			current_step_up;
 	int 			current_step_down;
 	unsigned int		rtg_boost_freq;
+#ifdef CONFIG_SIMPLE_FAS
+	bool			fas_enabled;
+	bool			fas_auto_config;
+	unsigned int	fas_target_fps_bias;
+	unsigned int 	fas_min_boost_freq;
+	unsigned int	fas_target_frame_time;
+	unsigned int 	fas_down_rate_limit_frame;
+	unsigned int	fas_normal_efficient_freq;
+	unsigned int    fas_normal_aggressiveness;
+	unsigned int    fas_normal_freq_boost_duration_frame;
+	unsigned int	fas_perf_mode_threshold;
+	unsigned int	fas_perf_mode_duration_ms;
+	unsigned int    fas_perf_aggressiveness;
+	unsigned int	fas_perf_efficient_freq;
+	unsigned int    fas_perf_freq_boost_duration_frame;
+#endif
 	bool			pl;
 	bool			limit_up;
 	bool			limit_down;
@@ -84,6 +106,10 @@ struct sugov_policy {
 	u64 last_cyc_update_time;
 	unsigned long avg_cap;
 	struct sugov_tunables	*tunables;
+#ifdef CONFIG_SIMPLE_FAS
+	struct fas_info	    *fas_info;
+	raw_spinlock_t		fas_update_lock;
+#endif
 	struct list_head	tunables_hook;
 	unsigned long hispeed_util;
 	unsigned long rtg_boost_util;
@@ -110,6 +136,8 @@ struct sugov_policy {
 
 	bool			limits_changed;
 	bool			need_freq_update;
+
+	unsigned int		flags;
 };
 
 struct sugov_cpu {
@@ -136,12 +164,68 @@ struct sugov_cpu {
 #endif
 };
 
+#ifdef CONFIG_SIMPLE_FAS
+// static DEFINE_RWLOCK(fas_mode_update);
+static int KMS_FRAME_PROC_DELAY_US = 4000;
+static int HWUI_FRAME_PROC_DELAY_US = 4000;
+static int cur_pid;
+static int kms_last_pid;
+static int hwui_last_pid;
+static bool in_home;
+static bool kms_mode_lock;
+static int frame_time;
+static u8 fas_mode = USE_HWUI_MON;
+static void fas_kms_mon_handler(u16 fps, u32 frame_time, ktime_t cur_time, u8 mode);
+static void fas_hwui_mon_handler(int frame_time, ktime_t cur_time, u8 mode);
+struct frame_mon_receiver fas_kms_mon_receiver = {
+	.jank_frame_time = CONFIG_FAS_DEFAULT_KMS_TARGET_FRAME_TIME,
+	.callback_handler = fas_kms_mon_handler
+};
+
+struct hwui_mon_receiver fas_hwui_mon_receiver = {
+	.jank_frame_time = CONFIG_FAS_DEFAULT_HWUI_TARGET_FRAME_TIME,
+	.callback_handler = fas_hwui_mon_handler
+};
+module_param(cur_pid, int, 0444);
+module_param(hwui_last_pid, int, 0444);
+module_param(fas_mode, byte, 0444);
+#endif
 static DEFINE_PER_CPU(struct sugov_cpu, sugov_cpu);
 static unsigned int stale_ns;
 static DEFINE_PER_CPU(struct sugov_tunables *, cached_tunables);
 
 /************************ Governor internals ***********************/
-
+#ifdef CONFIG_SIMPLE_FAS
+static inline unsigned int fas_get_freq(struct sugov_policy *sg_policy, u64 time)
+{
+	unsigned int freq = 0;
+	if (sg_policy->fas_info->freq_boost)
+	{
+		switch (sg_policy->fas_info->freq_boost) {
+			case 1:
+				if (sg_policy->fas_info->freq_boost_frame_count >=
+					sg_policy->tunables
+						->fas_normal_freq_boost_duration_frame) {
+					sg_policy->fas_info->freq_boost = 0;
+					sg_policy->fas_info->freq_boost_frame_count = 0;
+					return 0;
+				}
+				break;
+			case 2:
+				if (sg_policy->fas_info->freq_boost_frame_count >=
+					sg_policy->tunables
+						->fas_perf_freq_boost_duration_frame) {
+					sg_policy->fas_info->freq_boost = 0;
+					sg_policy->fas_info->freq_boost_frame_count = 0;
+					return 0;
+				}
+			break;
+		}
+		freq = sg_policy->fas_info->freq;
+	}
+	return freq;
+}
+#endif
 static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
 {
 	s64 delta_ns;
@@ -169,6 +253,11 @@ static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
 		sg_policy->need_freq_update = true;
 		return true;
 	}
+
+#ifdef CONFIG_SIMPLE_FAS
+	if (sg_policy->flags & SCHED_CPUFREQ_SKIP_LIMITS)
+		return true;
+#endif
 
 	/* No need to recalculate next freq for min_rate_limit_us
 	 * at least. However we might still decide to further rate
@@ -302,6 +391,11 @@ static bool sugov_up_down_rate_limit(struct sugov_policy *sg_policy, u64 time,
 	s64 delta_ns;
 
 	delta_ns = time - sg_policy->last_freq_update_time;
+
+#ifdef CONFIG_SIMPLE_FAS
+	if (sg_policy->flags & SCHED_CPUFREQ_SKIP_LIMITS)
+		return false;
+#endif
 
 	if (next_freq > sg_policy->next_freq &&
 	    delta_ns < sg_policy->up_rate_delay_ns)
@@ -460,6 +554,9 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 #if IS_ENABLED(CONFIG_PACKAGE_RUNTIME_INFO)
 	unsigned int walt_freq;
 #endif
+#ifdef CONFIG_SIMPLE_FAS
+	unsigned int fas_freq;
+#endif
 	unsigned int freq = arch_scale_freq_invariant() ?
 				policy->cpuinfo.max_freq : policy->cur;
 
@@ -473,7 +570,21 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 #else
 	freq = map_util_freq(util, freq, max, policy->cpu);
 #endif
+#ifdef CONFIG_SIMPLE_FAS
+	if (sg_policy->tunables->fas_enabled) {
+		fas_freq = fas_get_freq(sg_policy, time);
+		if(fas_freq)
+		{
+			freq = max(freq,fas_freq);
+			goto out;
+		}
+	}
+#endif
+
 	do_freq_limit(sg_policy, &freq, time);
+#ifdef CONFIG_SIMPLE_FAS
+out:
+#endif
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 		return sg_policy->next_freq;
 
@@ -851,6 +962,10 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
 	if (!sg_policy->tunables->pl && flags & SCHED_CPUFREQ_PL)
 		return;
 
+#ifdef CONFIG_SIMPLE_FAS
+	sg_policy->flags = flags;
+#endif
+
 	sugov_iowait_boost(sg_cpu, time, flags);
 	sg_cpu->last_update = time;
 
@@ -974,6 +1089,10 @@ sugov_update_shared(struct update_util_data *hook, u64 time, unsigned int flags)
 
 	if (!sg_policy->tunables->pl && flags & SCHED_CPUFREQ_PL)
 		return;
+
+#ifdef CONFIG_SIMPLE_FAS
+	sg_policy->flags = flags;
+#endif
 
 	sg_cpu->util = sugov_get_util(sg_cpu);
 	sg_cpu->flags = flags;
@@ -1292,7 +1411,338 @@ static ssize_t rtg_boost_freq_store(struct gov_attr_set *attr_set,
 
 	return count;
 }
+#ifdef CONFIG_SIMPLE_FAS
+static ssize_t fas_min_boost_freq_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
 
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_min_boost_freq);
+}
+
+static ssize_t fas_min_boost_freq_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	struct sugov_policy *sg_policy;
+	unsigned long flags;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_min_boost_freq = val;
+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) {
+		raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
+		sg_policy->fas_info->min_boost_freq_index =
+			cpufreq_frequency_table_target(sg_policy->policy,val,CPUFREQ_RELATION_L);
+		raw_spin_unlock_irqrestore(&sg_policy->update_lock, flags);
+	}
+	return count;
+}
+
+static ssize_t fas_down_rate_limit_frame_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_down_rate_limit_frame);
+}
+
+static ssize_t fas_down_rate_limit_frame_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	struct sugov_policy *sg_policy;
+	unsigned long flags;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_down_rate_limit_frame = val;
+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) {
+		raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
+		sg_policy->fas_info->min_boost_freq_index =
+			cpufreq_frequency_table_target(sg_policy->policy,val,CPUFREQ_RELATION_L);
+		raw_spin_unlock_irqrestore(&sg_policy->update_lock, flags);
+	}
+	return count;
+}
+
+static ssize_t fas_normal_efficient_freq_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_normal_efficient_freq);
+}
+
+static ssize_t fas_normal_efficient_freq_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+	tunables->fas_normal_efficient_freq = val;
+	return count;
+}
+static ssize_t fas_perf_efficient_freq_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_perf_efficient_freq);
+}
+
+static ssize_t fas_perf_efficient_freq_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+	tunables->fas_perf_efficient_freq = val;
+	return count;
+}
+static ssize_t fas_enabled_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_enabled);
+}
+
+static ssize_t fas_enabled_store(struct gov_attr_set *attr_set, const char *buf,
+				   size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	if (kstrtobool(buf, &tunables->fas_enabled))
+		return -EINVAL;
+
+	return count;
+}
+static ssize_t fas_auto_config_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_auto_config);
+}
+
+static ssize_t fas_auto_config_store(struct gov_attr_set *attr_set, const char *buf,
+				   size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	if (kstrtobool(buf, &tunables->fas_auto_config))
+		return -EINVAL;
+
+	return count;
+}
+static ssize_t fas_perf_mode_threshold_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_perf_mode_threshold);
+}
+
+static ssize_t fas_perf_mode_threshold_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_perf_mode_threshold = val;
+	return count;
+}
+static ssize_t fas_normal_aggressiveness_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_normal_aggressiveness);
+}
+
+static ssize_t fas_normal_aggressiveness_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_normal_aggressiveness = val;
+	return count;
+}
+static ssize_t fas_target_fps_bias_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_target_fps_bias);
+}
+
+static ssize_t fas_target_fps_bias_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_target_fps_bias = val;
+	return count;
+}
+static ssize_t fas_perf_aggressiveness_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_perf_aggressiveness);
+}
+
+static ssize_t fas_perf_aggressiveness_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_perf_aggressiveness = val;
+	return count;
+}
+static ssize_t fas_target_frame_time_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_target_frame_time);
+}
+
+static ssize_t fas_target_frame_time_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_target_frame_time = val;
+	fas_kms_mon_receiver.jank_frame_time = val;
+	return count;
+}
+
+static ssize_t fas_normal_freq_boost_duration_frame_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_normal_freq_boost_duration_frame);
+}
+
+static ssize_t fas_normal_freq_boost_duration_frame_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	struct sugov_policy *sg_policy;
+	unsigned long flags;
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_normal_freq_boost_duration_frame = val;
+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) {
+		raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
+		switch(sg_policy->fas_info->vrefresh)
+		{
+			case 144:
+				sg_policy->fas_info->normal_freq_boost_duration_ns = val * FRAME_TIME_144HZ_US * NSEC_PER_USEC;
+				break;
+			case 120:
+				sg_policy->fas_info->normal_freq_boost_duration_ns = val * FRAME_TIME_120HZ_US * NSEC_PER_USEC;
+				break;
+			case 90:
+				sg_policy->fas_info->normal_freq_boost_duration_ns = val * FRAME_TIME_90HZ_US * NSEC_PER_USEC;
+				break;
+			case 60:
+				sg_policy->fas_info->normal_freq_boost_duration_ns = val * FRAME_TIME_60HZ_US * NSEC_PER_USEC;
+				break;
+			default:
+				sg_policy->fas_info->normal_freq_boost_duration_ns = val * FRAME_TIME_120HZ_US * NSEC_PER_USEC;
+				break;	
+		}
+		raw_spin_unlock_irqrestore(&sg_policy->update_lock, flags);
+	}
+	return count;
+}
+static ssize_t fas_perf_freq_boost_duration_frame_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_perf_freq_boost_duration_frame);
+}
+
+static ssize_t fas_perf_freq_boost_duration_frame_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	struct sugov_policy *sg_policy;
+	unsigned long flags;
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_perf_freq_boost_duration_frame = val;
+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) {
+		raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
+		switch(sg_policy->fas_info->vrefresh)
+		{
+			case 144:
+				sg_policy->fas_info->perf_freq_boost_duration_ns = val * FRAME_TIME_144HZ_US * NSEC_PER_USEC;
+				break;
+			case 120:
+				sg_policy->fas_info->perf_freq_boost_duration_ns = val * FRAME_TIME_120HZ_US * NSEC_PER_USEC;
+				break;
+			case 90:
+				sg_policy->fas_info->perf_freq_boost_duration_ns = val * FRAME_TIME_90HZ_US * NSEC_PER_USEC;
+				break;
+			case 60:
+				sg_policy->fas_info->perf_freq_boost_duration_ns = val * FRAME_TIME_60HZ_US * NSEC_PER_USEC;
+				break;
+			default:
+				sg_policy->fas_info->perf_freq_boost_duration_ns = val * FRAME_TIME_120HZ_US * NSEC_PER_USEC;
+				break;	
+		}
+		raw_spin_unlock_irqrestore(&sg_policy->update_lock, flags);
+	}
+	return count;
+}
+static ssize_t fas_perf_mode_duration_ms_show(struct gov_attr_set *attr_set, char *buf)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", tunables->fas_perf_mode_duration_ms);
+}
+
+static ssize_t fas_perf_mode_duration_ms_store(struct gov_attr_set *attr_set,
+				    const char *buf, size_t count)
+{
+	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
+	unsigned int val;
+	struct sugov_policy *sg_policy;
+	unsigned long flags;
+	if (kstrtouint(buf, 10, &val))
+		return -EINVAL;
+
+	tunables->fas_perf_mode_duration_ms = val;
+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) {
+		raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
+		sg_policy->fas_info->perf_duration_ns = val * NSEC_PER_MSEC;
+		raw_spin_unlock_irqrestore(&sg_policy->update_lock, flags);
+	}
+	return count;
+}
+#endif
 static ssize_t powersave_freq_show(struct gov_attr_set *attr_set, char *buf)
 {
 	struct sugov_tunables *tunables = to_sugov_tunables(attr_set);
@@ -1569,6 +2019,22 @@ static ssize_t target_load_store(struct gov_attr_set *attr_set,
 static struct governor_attr hispeed_load = __ATTR_RW(hispeed_load);
 static struct governor_attr hispeed_freq = __ATTR_RW(hispeed_freq);
 static struct governor_attr rtg_boost_freq = __ATTR_RW(rtg_boost_freq);
+#ifdef CONFIG_SIMPLE_FAS
+static struct governor_attr fas_min_boost_freq = __ATTR_RW(fas_min_boost_freq);
+static struct governor_attr fas_down_rate_limit_frame = __ATTR_RW(fas_down_rate_limit_frame);
+static struct governor_attr fas_normal_efficient_freq = __ATTR_RW(fas_normal_efficient_freq);
+static struct governor_attr fas_perf_efficient_freq = __ATTR_RW(fas_perf_efficient_freq);
+static struct governor_attr fas_enabled = __ATTR_RW(fas_enabled);
+static struct governor_attr fas_auto_config = __ATTR_RW(fas_auto_config);
+static struct governor_attr fas_target_frame_time = __ATTR_RW(fas_target_frame_time);
+static struct governor_attr fas_perf_mode_threshold = __ATTR_RW(fas_perf_mode_threshold);
+static struct governor_attr fas_normal_aggressiveness = __ATTR_RW(fas_normal_aggressiveness);
+static struct governor_attr fas_target_fps_bias = __ATTR_RW(fas_target_fps_bias);
+static struct governor_attr fas_perf_aggressiveness = __ATTR_RW(fas_perf_aggressiveness);
+static struct governor_attr fas_perf_mode_duration_ms = __ATTR_RW(fas_perf_mode_duration_ms);
+static struct governor_attr fas_perf_freq_boost_duration_frame = __ATTR_RW(fas_perf_freq_boost_duration_frame);
+static struct governor_attr fas_normal_freq_boost_duration_frame = __ATTR_RW(fas_normal_freq_boost_duration_frame);
+#endif
 static struct governor_attr powersave_freq = __ATTR_RW(powersave_freq);
 static struct governor_attr pl = __ATTR_RW(pl);
 static struct governor_attr adaptive_up_freq = __ATTR_RW(adaptive_up_freq);
@@ -1586,6 +2052,22 @@ static struct attribute *sugov_attributes[] = {
 	&hispeed_freq.attr,
 	&target_load.attr,
 	&rtg_boost_freq.attr,
+#ifdef CONFIG_SIMPLE_FAS
+	&fas_min_boost_freq.attr,
+	&fas_down_rate_limit_frame.attr,
+	&fas_normal_efficient_freq.attr,
+	&fas_perf_efficient_freq.attr,
+	&fas_enabled.attr,
+	&fas_auto_config.attr,
+	&fas_target_frame_time.attr,
+	&fas_perf_mode_threshold.attr,
+	&fas_normal_aggressiveness.attr,
+	&fas_target_fps_bias.attr,
+	&fas_perf_aggressiveness.attr,
+	&fas_perf_mode_duration_ms.attr,
+	&fas_perf_freq_boost_duration_frame.attr,
+	&fas_normal_freq_boost_duration_frame.attr,
+#endif
 	&powersave_freq.attr,
 	&pl.attr,
 	&adaptive_up_freq.attr,
@@ -1625,6 +2107,9 @@ static struct sugov_policy *sugov_policy_alloc(struct cpufreq_policy *policy)
 
 	sg_policy->policy = policy;
 	raw_spin_lock_init(&sg_policy->update_lock);
+#ifdef CONFIG_SIMPLE_FAS
+	raw_spin_lock_init(&sg_policy->fas_update_lock);
+#endif
 	return sg_policy;
 }
 
@@ -1632,7 +2117,12 @@ static inline void sugov_policy_free(struct sugov_policy *sg_policy)
 {
 	kfree(sg_policy);
 }
-
+#ifdef CONFIG_SIMPLE_FAS
+static inline void sugov_fas_free(struct sugov_policy *sg_policy)
+{
+	kfree(sg_policy->fas_info);
+}
+#endif
 static int sugov_kthread_create(struct sugov_policy *sg_policy)
 {
 	struct task_struct *thread;
@@ -1695,6 +2185,16 @@ static struct sugov_tunables *sugov_tunables_alloc(struct sugov_policy *sg_polic
 	return tunables;
 }
 
+#ifdef CONFIG_SIMPLE_FAS
+static struct fas_info *fas_info_alloc(void)
+{
+	struct fas_info *fas_info;
+
+	fas_info = kzalloc(sizeof(*fas_info), GFP_KERNEL);
+	return fas_info;
+}
+#endif
+
 static void sugov_tunables_save(struct cpufreq_policy *policy,
 		struct sugov_tunables *tunables)
 {
@@ -1716,6 +2216,22 @@ static void sugov_tunables_save(struct cpufreq_policy *policy,
 	cached->pl = tunables->pl;
 	cached->hispeed_load = tunables->hispeed_load;
 	cached->rtg_boost_freq = tunables->rtg_boost_freq;
+#ifdef CONFIG_SIMPLE_FAS
+	cached->fas_min_boost_freq = tunables->fas_min_boost_freq;
+	cached->fas_down_rate_limit_frame = tunables->fas_down_rate_limit_frame;
+	cached->fas_normal_efficient_freq = tunables->fas_normal_efficient_freq;
+	cached->fas_perf_efficient_freq = tunables->fas_perf_efficient_freq;
+	cached->fas_enabled = tunables->fas_enabled;
+	cached->fas_auto_config = tunables->fas_auto_config;
+	cached->fas_target_frame_time = tunables->fas_target_frame_time;
+	cached->fas_perf_mode_threshold = tunables->fas_perf_mode_threshold;
+	cached->fas_normal_aggressiveness = tunables->fas_normal_aggressiveness;
+	cached->fas_target_fps_bias = tunables->fas_target_fps_bias;
+	cached->fas_perf_aggressiveness = tunables->fas_perf_aggressiveness;
+	cached->fas_perf_mode_duration_ms = tunables->fas_perf_mode_duration_ms;
+	cached->fas_perf_freq_boost_duration_frame = tunables->fas_perf_freq_boost_duration_frame;
+	cached->fas_normal_freq_boost_duration_frame = tunables->fas_normal_freq_boost_duration_frame;
+#endif
 	cached->powersave_freq = tunables->powersave_freq;
 	cached->hispeed_freq = tunables->hispeed_freq;
 	cached->up_rate_limit_us = tunables->up_rate_limit_us;
@@ -1752,6 +2268,22 @@ static void sugov_tunables_restore(struct cpufreq_policy *policy)
 	tunables->pl = cached->pl;
 	tunables->hispeed_load = cached->hispeed_load;
 	tunables->rtg_boost_freq = cached->rtg_boost_freq;
+#ifdef CONFIG_SIMPLE_FAS
+	tunables->fas_min_boost_freq = cached->fas_min_boost_freq;
+	tunables->fas_down_rate_limit_frame = cached->fas_down_rate_limit_frame;
+	tunables->fas_normal_efficient_freq = cached->fas_normal_efficient_freq;
+	tunables->fas_perf_efficient_freq = cached->fas_perf_efficient_freq;
+	tunables->fas_enabled = cached->fas_enabled;
+	tunables->fas_auto_config = cached->fas_auto_config;
+	tunables->fas_target_frame_time = cached->fas_target_frame_time;
+	tunables->fas_perf_mode_threshold = cached->fas_perf_mode_threshold;
+	tunables->fas_normal_aggressiveness = cached->fas_normal_aggressiveness;
+	tunables->fas_target_fps_bias = cached->fas_target_fps_bias;
+	tunables->fas_perf_aggressiveness = cached->fas_perf_aggressiveness;
+	tunables->fas_perf_mode_duration_ms = cached->fas_perf_mode_duration_ms;
+	tunables->fas_perf_freq_boost_duration_frame = cached->fas_perf_freq_boost_duration_frame;
+	tunables->fas_normal_freq_boost_duration_frame = cached->fas_normal_freq_boost_duration_frame;
+#endif
 	tunables->powersave_freq = cached->powersave_freq;
 	tunables->hispeed_freq = cached->hispeed_freq;
 	tunables->up_rate_limit_us = cached->up_rate_limit_us;
@@ -1772,6 +2304,9 @@ static int sugov_init(struct cpufreq_policy *policy)
 {
 	struct sugov_policy *sg_policy;
 	struct sugov_tunables *tunables;
+#ifdef CONFIG_SIMPLE_FAS
+	struct fas_info *fas_info;
+#endif
 	unsigned long util;
 	int ret = 0;
 
@@ -1811,7 +2346,19 @@ static int sugov_init(struct cpufreq_policy *policy)
 		goto stop_kthread;
 	}
 
+#ifdef CONFIG_SIMPLE_FAS
+	fas_info = fas_info_alloc();
 
+	if (!fas_info) {
+		ret = -ENOMEM;
+		goto stop_kthread;
+	}	
+	
+	fas_info->proc_max_freq_index = cpufreq_frequency_table_target(policy, policy->max,
+						     CPUFREQ_RELATION_L);
+
+	sg_policy->fas_info = fas_info;
+#endif	
 	
 	if (cpumask_test_cpu(sg_policy->policy->cpu, cpu_lp_mask)) {
 		tunables->up_rate_limit_us = CONFIG_SCHEDUTIL_UP_RATE_LIMIT_LP;
@@ -1821,7 +2368,22 @@ static int sugov_init(struct cpufreq_policy *policy)
     	tunables->nadaptive_up_freq = ARRAY_SIZE(default_adaptive_up_freq_lp);
 		tunables->adaptive_down_freq = default_adaptive_down_freq_lp;
     	tunables->nadaptive_down_freq = ARRAY_SIZE(default_adaptive_down_freq_lp);
-
+#ifdef CONFIG_SIMPLE_FAS
+		tunables->fas_min_boost_freq = CONFIG_FAS_DEFAULT_MIN_BOOST_FREQ_LP;
+		tunables->fas_down_rate_limit_frame = CONFIG_FAS_DEFAULT_DOWN_RATE_LIMIT_LP;
+		tunables->fas_normal_efficient_freq = CONFIG_FAS_DEFAULT_NORMAL_MODE_EFFICIENT_FREQ_LP;
+		tunables->fas_perf_efficient_freq = CONFIG_FAS_DEFAULT_PERF_MODE_EFFICIENT_FREQ_LP;
+		fas_info->min_boost_freq_index =
+			cpufreq_frequency_table_target(policy,
+				CONFIG_FAS_DEFAULT_MIN_BOOST_FREQ_LP,
+				CPUFREQ_RELATION_L);
+		tunables->fas_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_LP;
+		fas_info->kms_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_LP;
+		fas_info->hwui_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_LP;
+		tunables->fas_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_LP;
+		fas_info->kms_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_LP;
+		fas_info->hwui_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_LP;
+#endif
 		tunables->target_load = DEFAULT_TARGET_LOAD_LP;
 		tunables->hispeed_load = DEFAULT_HISPEED_LOAD_LP;
 		tunables->hispeed_freq = default_hispeed_freq_lp;
@@ -1841,6 +2403,22 @@ static int sugov_init(struct cpufreq_policy *policy)
 		tunables->nadaptive_up_freq = ARRAY_SIZE(default_adaptive_up_freq_hp);
 		tunables->adaptive_down_freq = default_adaptive_down_freq_hp;
 		tunables->nadaptive_down_freq = ARRAY_SIZE(default_adaptive_down_freq_hp);
+#ifdef CONFIG_SIMPLE_FAS
+		tunables->fas_min_boost_freq = CONFIG_FAS_DEFAULT_MIN_BOOST_FREQ_HP;
+		tunables->fas_down_rate_limit_frame = CONFIG_FAS_DEFAULT_DOWN_RATE_LIMIT_HP;
+		tunables->fas_normal_efficient_freq = CONFIG_FAS_DEFAULT_NORMAL_MODE_EFFICIENT_FREQ_HP;
+		tunables->fas_perf_efficient_freq = CONFIG_FAS_DEFAULT_PERF_MODE_EFFICIENT_FREQ_HP;
+		fas_info->min_boost_freq_index =
+			cpufreq_frequency_table_target(policy,
+				CONFIG_FAS_DEFAULT_MIN_BOOST_FREQ_HP,
+				CPUFREQ_RELATION_L);
+		tunables->fas_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_HP;
+		fas_info->kms_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_HP;
+		fas_info->hwui_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_HP;
+		tunables->fas_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_HP;
+		fas_info->kms_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_HP;
+		fas_info->hwui_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_HP;	
+#endif
 		tunables->target_load = DEFAULT_TARGET_LOAD_HP;
 		tunables->hispeed_load = DEFAULT_HISPEED_LOAD_HP;
 		tunables->hispeed_freq = default_hispeed_freq_hp;
@@ -1860,6 +2438,22 @@ static int sugov_init(struct cpufreq_policy *policy)
 		tunables->nadaptive_up_freq = ARRAY_SIZE(default_adaptive_up_freq_pr);
 		tunables->adaptive_down_freq = default_adaptive_down_freq_pr;
 		tunables->nadaptive_down_freq = ARRAY_SIZE(default_adaptive_down_freq_pr);
+#ifdef CONFIG_SIMPLE_FAS
+		tunables->fas_min_boost_freq = CONFIG_FAS_DEFAULT_MIN_BOOST_FREQ_PR;
+		tunables->fas_down_rate_limit_frame = CONFIG_FAS_DEFAULT_DOWN_RATE_LIMIT_PR;
+		tunables->fas_normal_efficient_freq = CONFIG_FAS_DEFAULT_NORMAL_MODE_EFFICIENT_FREQ_PR;
+		tunables->fas_perf_efficient_freq = CONFIG_FAS_DEFAULT_PERF_MODE_EFFICIENT_FREQ_PR;
+		fas_info->min_boost_freq_index =
+			cpufreq_frequency_table_target(policy,
+				CONFIG_FAS_DEFAULT_MIN_BOOST_FREQ_PR,
+				CPUFREQ_RELATION_L);
+		tunables->fas_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_PR;
+		fas_info->kms_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_PR;
+		fas_info->hwui_normal_aggressiveness = CONFIG_FAS_DEFAULT_NORMAL_MODE_AGGRESSIVENESS_PR;
+		tunables->fas_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_PR;
+		fas_info->kms_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_PR;
+		fas_info->hwui_perf_aggressiveness = CONFIG_FAS_DEFAULT_PERF_MODE_AGGRESSIVENESS_PR;		
+#endif
 		tunables->target_load = DEFAULT_TARGET_LOAD_PR;
 		tunables->hispeed_load = DEFAULT_HISPEED_LOAD_PR;
 		tunables->hispeed_freq = default_hispeed_freq_pr;
@@ -1885,7 +2479,21 @@ static int sugov_init(struct cpufreq_policy *policy)
 		tunables->rtg_boost_freq = DEFAULT_CPU7_RTG_BOOST_FREQ;
 		break;
 	}
-
+#ifdef CONFIG_SIMPLE_FAS
+	tunables->fas_target_fps_bias = 50;
+	tunables->fas_enabled = true;
+	tunables->fas_auto_config = true;
+	tunables->fas_perf_mode_threshold = CONFIG_FAS_DEFAULT_PERFORMANCE_MODE_THRESHOLD;
+	tunables->fas_target_frame_time = CONFIG_FAS_DEFAULT_HWUI_TARGET_FRAME_TIME;
+	fas_info->hwui_target_frame_time = CONFIG_FAS_DEFAULT_HWUI_TARGET_FRAME_TIME;
+	fas_info->kms_target_frame_time = CONFIG_FAS_DEFAULT_KMS_TARGET_FRAME_TIME;
+	tunables->fas_normal_freq_boost_duration_frame = DEFAULT_FAS_NORMAL_MODE_FREQ_BOOST_DURATION_FRAME;
+	fas_info->normal_freq_boost_duration_ns = DEFAULT_FAS_NORMAL_MODE_FREQ_BOOST_DURATION_FRAME * FRAME_TIME_144HZ_US * NSEC_PER_USEC;
+	tunables->fas_perf_freq_boost_duration_frame = DEFAULT_FAS_PERF_MODE_FREQ_BOOST_DURATION_FRAME;
+	fas_info->perf_freq_boost_duration_ns = DEFAULT_FAS_PERF_MODE_FREQ_BOOST_DURATION_FRAME * FRAME_TIME_144HZ_US * NSEC_PER_USEC;
+	tunables->fas_perf_mode_duration_ms = CONFIG_FAS_DEFAULT_PERF_MODE_BOOST_DURATION_MS;
+	fas_info->perf_duration_ns = CONFIG_FAS_DEFAULT_PERF_MODE_BOOST_DURATION_MS * NSEC_PER_MSEC;
+#endif
 	policy->governor_data = sg_policy;
 	sg_policy->tunables = tunables;
 
@@ -1943,6 +2551,9 @@ static void sugov_exit(struct cpufreq_policy *policy)
 	mutex_unlock(&global_tunables_lock);
 
 	sugov_kthread_stop(sg_policy);
+#ifdef CONFIG_SIMPLE_FAS
+	sugov_fas_free(sg_policy);
+#endif
 	sugov_policy_free(sg_policy);
 	cpufreq_disable_fast_switch(policy);
 }
@@ -2046,6 +2657,580 @@ static struct cpufreq_governor schedutil_gov = {
 	.limits			= sugov_limits,
 };
 
+#ifdef CONFIG_SIMPLE_FAS
+inline void trace_top_app(struct task_struct *p)
+{
+    if(p)
+    {
+         cur_pid = p->pid;
+    }
+}
+
+static inline bool fas_boost_ctl(struct sugov_policy *sg_policy,
+			  u32 frame_time, ktime_t cur_time, bool is_jank)
+{
+	if(is_jank)
+	{
+		unsigned int freq_index;
+		u32 new_frame_time;
+		u32 delta_frame_time;
+		unsigned long flags;
+		sg_policy->fas_info->smooth_frame_count = 0;
+
+		if(frame_time > sg_policy->tunables->fas_perf_mode_threshold && 
+				sg_policy->fas_info->perf_mode_end_time <= cur_time){
+			sg_policy->fas_info->perf_mode_end_time = cur_time +
+				sg_policy->fas_info->perf_duration_ns;
+		}
+		// Get the index of the current frequency.
+		freq_index = cpufreq_frequency_table_target(
+			sg_policy->policy, sg_policy->policy->cur, CPUFREQ_RELATION_L);
+
+		// Calculate the change of the frame_time.
+		delta_frame_time =   
+			sg_policy->fas_info->last_frame_time ?
+				(frame_time - sg_policy->fas_info->last_frame_time) : 0;
+
+		/*
+		* If the current task is not critical task and the performance mode is not active,
+		* we will use normal mode to calculate the next frequency.
+		* Otherwise, we will use performance mode to calculate the next frequency.
+		*/
+		if (!(sg_policy->fas_info->perf_mode_end_time > cur_time || is_fas_critical_task(current)))
+		{
+			/*
+			* new_frame_time = frame_time + 0.6 * delta_frame_time
+			* 
+			* The coefficient 0.6 effects the proportion of the history in the new_frame_time.
+			* The best value of the coefficient is still under discussion.
+			* 
+			* delta_freq_index = (aggressiveness * fas_normal_efficient_freq * new_frame_time) / 
+			*				(cur_freq * target_frame_time * 100)
+			* 
+			* When the frame_time is longer than the target_frame_time, the delta_freq_index 
+			* will be positive, which means the frequency will rise. Smaller aggressiveness 
+			* results in a smaller delta_freq_index, causing the frequency to change more negatively.
+			* Frequency is tend to stay at the efficient_freq since it's easier to rise the frequency
+			* when current frequency is lower than efficient_freq and hard to rise the frequency when
+			* current frequency is higher than efficient_freq.
+			* Since we are doing integer calculation, the delta_freq_index will be rounded down.
+			* 
+			* new_freq_index = old_freq_index + delta_freq_index
+			* 
+			* The new_freq_index is calculated by adding the delta_freq_index to the
+			* old_freq_index.
+			*/
+			new_frame_time = frame_time + (0.6 * delta_frame_time);
+			freq_index += (sg_policy->tunables->fas_normal_aggressiveness * new_frame_time *
+					sg_policy->tunables->fas_normal_efficient_freq ) / 
+				(sg_policy->tunables->fas_target_frame_time * sg_policy->policy->cur * 100);
+		}
+		else 
+		{
+			/*
+			* Make the new_frame_time larger when in performance mode.
+			*/
+			new_frame_time =
+				frame_time + (delta_frame_time > 0 ?
+							delta_frame_time :
+							0.4 * delta_frame_time);
+			freq_index += (sg_policy->tunables->fas_perf_aggressiveness *
+					new_frame_time * sg_policy->tunables->fas_perf_efficient_freq) / 
+				(sg_policy->tunables->fas_target_frame_time * sg_policy->policy->cur * 100);
+		}
+		// Limit the frequency's upper and lower bound.
+		if(freq_index < sg_policy->fas_info->min_boost_freq_index)
+		{
+			freq_index = sg_policy->fas_info->min_boost_freq_index;
+		}
+		else if(freq_index > sg_policy->fas_info->proc_max_freq_index)
+		{
+			freq_index = sg_policy->fas_info->proc_max_freq_index;
+		}
+		
+		// Control the frequency boost status.
+		if(!sg_policy->fas_info->freq_boost)
+		{
+			sg_policy->fas_info->freq_boost =
+				(sg_policy->fas_info->perf_mode_end_time > cur_time ?
+					2 :	1);
+		}
+
+		sg_policy->fas_info->freq =
+			sg_policy->policy->freq_table[freq_index].frequency;
+
+		sg_policy->fas_info->freq_index = freq_index;
+		sg_policy->fas_info->last_frame_time = frame_time;
+		if(sg_policy->fas_info->freq != sg_policy->policy->cur)
+		{
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	else
+	{
+		if(sg_policy->fas_info->freq_boost)
+		{
+			if(sg_policy->fas_info->smooth_frame_count >= sg_policy->tunables->fas_down_rate_limit_frame)
+			{
+				int delta_index;
+				sg_policy->fas_info->smooth_frame_count = 0;
+				delta_index = sg_policy->tunables->fas_target_frame_time / frame_time;
+				if(sg_policy->fas_info->freq_index >= delta_index)
+					sg_policy->fas_info->freq_index -= delta_index;
+				else
+					sg_policy->fas_info->freq_index = 0;
+				if(sg_policy->fas_info->freq_index < sg_policy->fas_info->min_boost_freq_index)
+				{
+					sg_policy->fas_info->freq_index = sg_policy->fas_info->min_boost_freq_index;
+				}
+				sg_policy->fas_info->freq =
+						sg_policy->policy->freq_table[sg_policy->fas_info->freq_index].frequency;
+				return true;
+			}
+			else
+			{
+				sg_policy->fas_info->smooth_frame_count ++;
+				return false;
+			}
+		}
+	}
+	return false;
+}
+
+static inline void fas_dynamic_config(u16 fps,struct sugov_policy *sg_policy)
+{
+	static int kms_integral = 0, kms_last_error = 0;
+	static int hwui_integral = 0, hwui_last_error = 0;
+	int hwui_error,hwui_derivative;
+	int kms_error,kms_derivative;
+	int kms_aggressiveness_bias,kms_proc_delay_bias;
+	int hwui_aggressiveness_bias,hwui_proc_delay_bias;
+	unsigned long flags;
+	if(sg_policy->tunables->fas_auto_config)
+	{
+		switch (fas_mode)
+		{
+		case USE_HWUI_MON:
+			hwui_error = fps - sg_policy->fas_info->vrefresh_mul_10 + sg_policy->tunables->fas_target_fps_bias;
+			hwui_integral = hwui_integral * 0.9 + hwui_error * 0.1;
+			hwui_derivative = hwui_error - hwui_last_error;
+			hwui_last_error = hwui_error;
+			hwui_proc_delay_bias = -10 * (hwui_error * 0.8 + hwui_integral * 0.3 + hwui_derivative * 0.05);
+			HWUI_FRAME_PROC_DELAY_US += hwui_proc_delay_bias;
+			hwui_aggressiveness_bias = - (hwui_error * 0.9 + hwui_integral * 0.1 + hwui_derivative * 0.1);
+			if(HWUI_FRAME_PROC_DELAY_US > 5000)
+			{
+				HWUI_FRAME_PROC_DELAY_US = 5000;
+			}
+			else if(HWUI_FRAME_PROC_DELAY_US < 2000)
+			{
+				HWUI_FRAME_PROC_DELAY_US = 2000;
+			}
+			sg_policy->tunables->fas_normal_aggressiveness += hwui_aggressiveness_bias;
+			if(sg_policy->tunables->fas_normal_aggressiveness > 110)
+			{
+				sg_policy->tunables->fas_normal_aggressiveness = 110;
+			}
+			else if(sg_policy->tunables->fas_normal_aggressiveness < 50)
+			{
+				sg_policy->tunables->fas_normal_aggressiveness = 50;
+			}
+			fas_hwui_mon_receiver.jank_frame_time = frame_time - HWUI_FRAME_PROC_DELAY_US;
+			sg_policy->tunables->fas_target_frame_time = frame_time - HWUI_FRAME_PROC_DELAY_US;
+			sg_policy->tunables->fas_perf_mode_threshold = 2 * sg_policy->tunables->fas_target_frame_time;
+			sg_policy->fas_info->hwui_target_frame_time = frame_time - HWUI_FRAME_PROC_DELAY_US;
+			sg_policy->tunables->fas_perf_aggressiveness = sg_policy->tunables->fas_normal_aggressiveness + 20;
+			sg_policy->fas_info->hwui_normal_aggressiveness = sg_policy->tunables->fas_normal_aggressiveness;
+			sg_policy->fas_info->hwui_perf_aggressiveness = sg_policy->tunables->fas_perf_aggressiveness;
+			break;
+		
+		case USE_KMS_MON:
+			kms_error = fps - sg_policy->fas_info->vrefresh_mul_10 + sg_policy->tunables->fas_target_fps_bias;
+			kms_integral = kms_integral * 0.9 + kms_error * 0.1;
+			kms_derivative = kms_error - kms_last_error;
+			kms_last_error = kms_error;
+			kms_proc_delay_bias = -5 * (kms_error * 0.9 + kms_integral * 0.4 + kms_derivative * 0.05);
+			KMS_FRAME_PROC_DELAY_US += kms_proc_delay_bias;
+			kms_aggressiveness_bias = - (kms_error * 0.8 + kms_integral * 0.1 + kms_derivative * 0.3);
+
+			if (KMS_FRAME_PROC_DELAY_US > frame_time - 2000)
+			{
+				KMS_FRAME_PROC_DELAY_US = frame_time - 2000;
+			}
+			else if (KMS_FRAME_PROC_DELAY_US < 3000)
+			{
+				KMS_FRAME_PROC_DELAY_US = 3000;
+			}
+			sg_policy->tunables->fas_normal_aggressiveness += kms_aggressiveness_bias;
+			if (sg_policy->tunables->fas_normal_aggressiveness > 130)
+			{
+				sg_policy->tunables->fas_normal_aggressiveness = 130;
+			}
+			else if (sg_policy->tunables->fas_normal_aggressiveness < 60)
+			{
+				sg_policy->tunables->fas_normal_aggressiveness = 60;
+			}
+			fas_kms_mon_receiver.jank_frame_time = frame_time - KMS_FRAME_PROC_DELAY_US;
+			sg_policy->tunables->fas_target_frame_time = frame_time - KMS_FRAME_PROC_DELAY_US;
+			sg_policy->tunables->fas_perf_mode_threshold = 2 * sg_policy->tunables->fas_target_frame_time;
+			sg_policy->fas_info->kms_target_frame_time = frame_time - KMS_FRAME_PROC_DELAY_US;
+			sg_policy->tunables->fas_perf_aggressiveness = sg_policy->tunables->fas_normal_aggressiveness + 20;
+			sg_policy->fas_info->kms_normal_aggressiveness = sg_policy->tunables->fas_normal_aggressiveness;
+			sg_policy->fas_info->kms_perf_aggressiveness = sg_policy->tunables->fas_perf_aggressiveness;
+			break;
+		}
+	}
+}
+
+static inline void perf_mode_extra(struct sugov_policy *sg_policy,
+			u32 frame_time,ktime_t cur_time,u8 mode)
+{
+	if(frame_time > sg_policy->tunables->fas_perf_mode_threshold)
+	{
+		devfreq_boost_kick_max(DEVFREQ_CPU_LLCC_DDR_BW,500);
+	}
+	if(mode == USE_HWUI_MON)
+	{
+		if(frame_time > sg_policy->tunables->fas_perf_mode_threshold)
+		{
+			current->fas_boosted = true;
+		}
+		else 
+		{
+			if(sg_policy->fas_info->perf_mode_end_time <= cur_time)
+			{
+				current->fas_boosted = false;
+			}
+		}
+	}
+}
+static inline void fas_freq_boost_duration_counter(bool clear)
+{
+	int cpu;
+	struct sugov_cpu *sg_cpu;
+	for_each_possible_cpu(cpu) {
+		sg_cpu = &per_cpu(sugov_cpu, cpu);
+		if(!clear)
+		{
+			if(sg_cpu->sg_policy->fas_info->freq_boost)
+			sg_cpu->sg_policy->fas_info->freq_boost_frame_count++;
+		}
+		else
+		{
+			sg_cpu->sg_policy->fas_info->freq_boost = false;
+			sg_cpu->sg_policy->fas_info->freq_boost_frame_count = 0;
+		}
+		
+	}
+}
+
+static void fas_kms_mon_handler(u16 fps, u32 frame_time, ktime_t cur_time, u8 mode)
+{
+	static bool hwui_mon_checker_start;
+	static ktime_t hwui_mon_checker_end_time;
+	int cpu;
+	bool is_jank;
+	bool fas_freq_need_update;
+	// bool fas_mode_need_update;
+	// bool run_on_tgt_cpu = false;
+	unsigned long flags;
+	struct rq *rq;
+	struct sugov_cpu *sg_cpu;
+	struct task_struct *top_app;
+
+	raw_spin_lock_irqsave(&sg_cpu->sg_policy->fas_update_lock, flags);
+	top_app = find_task_by_vpid(cur_pid);
+	if(top_app)
+		cpu = task_cpu(top_app);
+		if(!cpumask_test_cpu(cpu, cpu_online_mask))
+			goto try_fixed_cpus;
+	else 
+try_fixed_cpus:
+		if(cpumask_test_cpu(4, cpu_online_mask))
+			cpu = 4;
+		else if(cpumask_test_cpu(7, cpu_online_mask))
+			cpu = 7;
+		else
+			goto fas_kms_handler_out;
+			
+	sg_cpu = &per_cpu(sugov_cpu, cpu);
+
+	// Check if fas is enabled.
+	if (sg_cpu->sg_policy == NULL ||
+	        !sg_cpu->sg_policy->tunables->fas_enabled) {
+		goto fas_kms_handler_out;
+	}
+	
+	// read_lock_irqsave(&fas_mode_update, flags);
+	// fas_mode_need_update = (fas_mode == USE_HWUI_MON) ? true : false;
+	// read_unlock_irqrestore(&fas_mode_update, flags);
+
+	switch (mode)
+	{
+		// case FPS_UPDATED:
+		// 	fas_dynamic_config(fps,sg_cpu->sg_policy);
+		// 	goto fas_kms_handler_out;
+		// 	break;
+		case IS_JANK:
+			is_jank = true;
+			break;
+		case IS_FLUID:
+			is_jank = false;
+			break;
+		case IDLE:
+			fas_freq_boost_duration_counter(true);
+			goto fas_kms_handler_out;
+			break;
+	}
+	
+	if(fas_mode == USE_HWUI_MON)
+	{
+		if(cur_pid != hwui_last_pid && !in_home)
+		{
+			
+			if(!hwui_mon_checker_start)
+			{
+				hwui_mon_checker_start = true;
+				hwui_mon_checker_end_time = cur_time + HWUI_MON_CHECKER_DURATION_NS;
+			}
+			else
+			{
+				if(hwui_mon_checker_end_time < cur_time)
+				{
+					hwui_mon_checker_start = false;
+					// write_lock_irqsave(&fas_mode_update, flags);
+					fas_mode = USE_KMS_MON;
+					kms_mode_lock = true;
+					// write_unlock_irqrestore(&fas_mode_update, flags);
+					sg_cpu->sg_policy->tunables->fas_normal_aggressiveness = 
+							sg_cpu->sg_policy->fas_info->kms_normal_aggressiveness;
+					sg_cpu->sg_policy->tunables->fas_perf_aggressiveness = 
+							sg_cpu->sg_policy->fas_info->kms_perf_aggressiveness;
+					sg_cpu->sg_policy->tunables->fas_target_frame_time = 
+							sg_cpu->sg_policy->fas_info->kms_target_frame_time;
+				}
+			}
+		}
+		else if(hwui_mon_checker_start)
+		{
+			hwui_mon_checker_start = false;
+		}
+	}
+	if(fas_mode == USE_KMS_MON)
+	{
+		fas_freq_boost_duration_counter(false);
+		if(cur_pid != kms_last_pid)
+		{
+			kms_mode_lock = false;
+			struct task_struct *last_p;
+
+			// Clean last_frame_time when switch to new task.
+			if(kms_last_pid && 
+				(last_p = find_task_by_vpid(kms_last_pid))){
+				if(last_p->fas_boosted)
+				{
+					task_lock(last_p);
+					last_p->fas_boosted = false;
+					task_unlock(last_p);
+				}
+			}
+			sg_cpu->sg_policy->fas_info->last_frame_time = 0;
+			kms_last_pid = cur_pid;
+		}
+		// raw_spin_lock_irqsave(&sg_cpu->sg_policy->update_lock, flags);
+		fas_freq_need_update = fas_boost_ctl(sg_cpu->sg_policy,frame_time,cur_time,is_jank);
+		if(fas_freq_need_update)
+		{
+			rq = cpu_rq(cpu);
+			rcu_read_lock_sched();
+			// get_online_cpus();
+			raw_spin_lock_irqsave(&rq->lock, flags);
+			cpufreq_update_util(rq, SCHED_CPUFREQ_SKIP_LIMITS);
+			raw_spin_unlock_irqrestore(&rq->lock, flags);
+			// put_online_cpus();
+			rcu_read_unlock_sched();
+		}
+		perf_mode_extra(sg_cpu->sg_policy,frame_time,cur_time,USE_KMS_MON);	
+		// raw_spin_unlock_irqrestore(&sg_cpu->sg_policy->update_lock, flags);
+	}
+	
+fas_kms_handler_out:
+	raw_spin_unlock_irqrestore(&sg_cpu->sg_policy->fas_update_lock, flags);
+	return;
+}
+
+static void fas_hwui_mon_handler(int frame_time, ktime_t cur_time, u8 mode)
+{
+	int cpu;
+	bool is_jank;
+	// bool fas_mode_need_update;
+	bool fas_freq_need_update;
+	unsigned long flags;
+	struct rq *rq;
+	struct sugov_cpu *sg_cpu;
+
+	raw_spin_lock_irqsave(&sg_cpu->sg_policy->fas_update_lock, flags);
+	cpu = get_cpu();
+	sg_cpu = &per_cpu(sugov_cpu, cpu);
+	// Check if fas is enabled.
+	if (sg_cpu->sg_policy == NULL ||
+	        !sg_cpu->sg_policy->tunables->fas_enabled) {
+		goto fas_hwui_handler_out;
+	}
+	
+	// read_lock_irqsave(&fas_mode_update, flags);
+	// fas_mode_need_update = (fas_mode == USE_KMS_MON) ? true : false;
+	// read_unlock_irqrestore(&fas_mode_update, flags);
+
+	if(current->pid != hwui_last_pid && strncmp(current->comm, "curitycenter:ui",strlen("curitycenter:ui")) && 
+			strncmp(current->comm, "ndroid.systemui",strlen("ndroid.systemui")) && !strstr(current->comm, "inputmethod"))
+	{
+		struct task_struct *last_p;
+
+        // Clean last_frame_time when switch to new task.
+        if(hwui_last_pid && 
+			(last_p = find_task_by_vpid(hwui_last_pid))){
+			if(last_p->fas_boosted)
+			{
+				task_lock(last_p);
+				last_p->fas_boosted = false;
+				task_unlock(last_p);
+			}
+		}
+		sg_cpu->sg_policy->fas_info->last_frame_time = 0;
+		hwui_last_pid = current->pid;
+		if(!strncmp(current->comm, "com.miui.home",strlen("com.miui.home")))
+		{
+			in_home = true;
+			kms_mode_lock = false;
+		}
+		else
+		{
+			in_home = false;
+		}
+	}
+
+	if(fas_mode == USE_KMS_MON && !kms_mode_lock)
+	{
+		// write_lock_irqsave(&fas_mode_update, flags);
+		fas_mode = USE_HWUI_MON;
+		// write_unlock_irqrestore(&fas_mode_update, flags);
+		sg_cpu->sg_policy->tunables->fas_normal_aggressiveness = 
+				sg_cpu->sg_policy->fas_info->hwui_normal_aggressiveness;
+		sg_cpu->sg_policy->tunables->fas_perf_aggressiveness = 
+				sg_cpu->sg_policy->fas_info->hwui_perf_aggressiveness;
+		sg_cpu->sg_policy->tunables->fas_target_frame_time = 
+				sg_cpu->sg_policy->fas_info->hwui_target_frame_time;
+	}
+
+	if(fas_mode == USE_HWUI_MON)
+	{
+		fas_freq_boost_duration_counter(false);
+		switch (mode)
+		{
+			case IS_JANK:
+				is_jank = true;
+				break;
+			case IS_FLUID:
+				is_jank = false;
+				break;
+		}
+		// raw_spin_lock_irqsave(&sg_cpu->sg_policy->update_lock, flags);
+		fas_freq_need_update = fas_boost_ctl(sg_cpu->sg_policy,frame_time,cur_time,is_jank);
+		if(fas_freq_need_update)
+		{
+			rq = cpu_rq(cpu);
+			raw_spin_lock_irqsave(&rq->lock, flags);
+			cpufreq_update_util(rq, SCHED_CPUFREQ_SKIP_LIMITS);
+			raw_spin_unlock_irqrestore(&rq->lock, flags);
+		}
+		perf_mode_extra(sg_cpu->sg_policy,frame_time,cur_time,USE_HWUI_MON);
+		// raw_spin_unlock_irqrestore(&sg_cpu->sg_policy->update_lock, flags);
+	}
+
+fas_hwui_handler_out:
+	put_cpu();
+	raw_spin_unlock_irqrestore(&sg_cpu->sg_policy->fas_update_lock, flags);
+	return;
+}
+
+inline bool fas_ctl_by_vrefresh(int vrefresh)
+{
+	int cpu;
+	struct sugov_cpu *sg_cpu;
+	struct sugov_policy *sg_policy;
+	unsigned long flags;
+	for_each_possible_cpu(cpu) {
+		sg_cpu = &per_cpu(sugov_cpu, cpu);
+		sg_policy = sg_cpu->sg_policy;
+		if (sg_policy && sg_policy->fas_info) 
+		{
+			sg_policy->fas_info->vrefresh = vrefresh;
+			sg_policy->fas_info->vrefresh_mul_10 = vrefresh * 10;
+			switch(vrefresh)
+			{
+				case 144:
+					frame_time = FRAME_TIME_144HZ_US;
+					break;
+				case 120:
+					frame_time = FRAME_TIME_120HZ_US;
+					break;
+				case 90:
+					frame_time = FRAME_TIME_90HZ_US;
+					break;
+				case 60:
+					frame_time = FRAME_TIME_60HZ_US;
+					break;
+				default:
+					frame_time = FRAME_TIME_120HZ_US;
+					break;	
+			}
+			if(sg_policy->tunables->fas_auto_config)
+			{
+				
+				switch (fas_mode)
+				{
+				case USE_HWUI_MON:
+					fas_hwui_mon_receiver.jank_frame_time = frame_time - HWUI_FRAME_PROC_DELAY_US;
+					sg_policy->tunables->fas_target_frame_time = frame_time - HWUI_FRAME_PROC_DELAY_US;
+					sg_policy->tunables->fas_perf_mode_threshold = 2 * sg_policy->tunables->fas_target_frame_time;
+					sg_policy->fas_info->hwui_target_frame_time = frame_time - HWUI_FRAME_PROC_DELAY_US;
+					break;
+				case USE_KMS_MON:
+					fas_kms_mon_receiver.jank_frame_time = frame_time - KMS_FRAME_PROC_DELAY_US;
+					sg_policy->tunables->fas_target_frame_time = frame_time - KMS_FRAME_PROC_DELAY_US;
+					sg_policy->tunables->fas_perf_mode_threshold = frame_time / 2 + sg_policy->tunables->fas_target_frame_time;
+					sg_policy->fas_info->kms_target_frame_time = frame_time - KMS_FRAME_PROC_DELAY_US;
+					break;
+				}
+				
+				sg_policy->tunables->fas_normal_freq_boost_duration_frame = DEFAULT_FAS_NORMAL_MODE_FREQ_BOOST_DURATION_TIME_US / frame_time;
+				sg_policy->tunables->fas_perf_freq_boost_duration_frame = DEFAULT_FAS_PERF_MODE_FREQ_BOOST_DURATION_TIME_US / frame_time;
+			}
+			sg_policy->fas_info->normal_freq_boost_duration_ns =
+				sg_policy->tunables->fas_normal_freq_boost_duration_frame * frame_time * NSEC_PER_USEC;
+			sg_policy->fas_info->perf_freq_boost_duration_ns =
+				sg_policy->tunables->fas_perf_freq_boost_duration_frame * frame_time * NSEC_PER_USEC;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+int __init sugov_init_fas(void)
+{
+	return register_fps_mon_handler(&fas_kms_mon_receiver) || 
+			register_hwui_mon(&fas_hwui_mon_receiver);
+}
+#endif
+
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
 struct cpufreq_governor *cpufreq_default_governor(void)
 {
@@ -2055,6 +3240,11 @@ struct cpufreq_governor *cpufreq_default_governor(void)
 
 static int __init sugov_register(void)
 {
+#ifdef CONFIG_SIMPLE_FAS
+	return cpufreq_register_governor(&schedutil_gov) ||
+	        sugov_init_fas();
+#else
 	return cpufreq_register_governor(&schedutil_gov);
+#endif
 }
 fs_initcall(sugov_register);

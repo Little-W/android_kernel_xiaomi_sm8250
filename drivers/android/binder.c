@@ -5734,6 +5734,15 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	}
 #endif
 
+#ifdef CONFIG_SIMPLE_FAS
+	if ((strncmp(proc->tsk->comm, "com.miui.home",
+				strlen("com.miui.home")) == 0) ||
+		(strncmp(proc->tsk->comm, "com.android.systemui",
+				strlen("ndroid.systemui")) == 0)) {
+		proc->tsk->fas_critical_task = 1;
+	}
+#endif
+
 	/* binderfs stashes devices in i_private */
 	if (is_binderfs_device(nodp)) {
 		binder_dev = nodp->i_private;

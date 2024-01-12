@@ -58,7 +58,9 @@
 #include <linux/psi.h>
 #include <linux/cpu.h>
 #include <net/sock.h>
-
+#ifdef CONFIG_SIMPLE_FAS
+#include <linux/sched/simple_fas.h>
+#endif
 #define CREATE_TRACE_POINTS
 #include <trace/events/cgroup.h>
 
@@ -2755,7 +2757,7 @@ int cgroup_migrate(struct task_struct *leader, bool threadgroup,
  *
  * Call holding cgroup_mutex and cgroup_threadgroup_rwsem.
  */
-#if IS_ENABLED(CONFIG_PERF_HUMANTASK)
+#if IS_ENABLED(CONFIG_PERF_HUMANTASK) || defined(CONFIG_SIMPLE_FAS)
 #define PATH_LEN 1024
 #endif
 int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
@@ -2764,7 +2766,7 @@ int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 	DEFINE_CGROUP_MGCTX(mgctx);
 	struct task_struct *task;
 	int ret;
-#if IS_ENABLED(CONFIG_PERF_HUMANTASK)
+#if IS_ENABLED(CONFIG_PERF_HUMANTASK) || defined(CONFIG_SIMPLE_FAS)
 	char dst_path[PATH_LEN ];
 #endif
 
@@ -2792,6 +2794,8 @@ int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 	cgroup_migrate_finish(&mgctx);
 
 	if (!ret) {
+
+	
 #if IS_ENABLED(CONFIG_PERF_HUMANTASK)
 		memset(dst_path,0,sizeof(dst_path));
 		cgroup_path(dst_cgrp, dst_path, PATH_LEN);
@@ -2805,11 +2809,34 @@ int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 			} else {
 				leader->human_task = 0;
 			}
+#ifdef CONFIG_SIMPLE_FAS
+			if (strstr(dst_path, "top-app") && 
+				strncmp(leader->comm, "ndroid.systemui",strlen("ndroid.systemui")) && 
+				!strstr(leader->comm, "inputmethod")){
+					trace_top_app(leader);
+				}
+				
+#endif
 			task_unlock(leader);
 		}
 	}
 #else
+#ifdef CONFIG_SIMPLE_FAS
+		memset(dst_path,0,sizeof(dst_path));
+		cgroup_path(dst_cgrp, dst_path, PATH_LEN);
+		trace_cgroup_attach_task(dst_cgrp, dst_path,leader, threadgroup);
+		if (strlen(dst_path) > 2) {
+			task_lock(leader);
+			if (strstr(dst_path, "top-app") && 
+				strncmp(leader->comm, "ndroid.systemui",strlen("ndroid.systemui")) && 
+				!strstr(leader->comm, "inputmethod")){
+					trace_top_app(leader);
+				}
+			task_unlock(leader);
+		}
+#else
 		TRACE_CGROUP_PATH(attach_task, dst_cgrp, leader, threadgroup);
+#endif
 	}
 #endif
 

@@ -6138,6 +6138,20 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	if (retval)
 		goto out_free_new_mask;
 
+#ifdef CONFIG_SIMPLE_FAS
+	if (p->fas_boosted)
+	{
+		retval = -EPERM;
+		cpuset_cpus_allowed(p, cpus_allowed);
+		cpumask_or(&allowed_mask, cpu_perf_mask, cpu_prime_mask);
+		dest_cpu = cpumask_any_and(cpu_active_mask, &allowed_mask);
+		if (dest_cpu < nr_cpu_ids) {
+			 cpuset_cpus_allowed(p, cpus_allowed);
+		}
+		goto out_free_new_mask;
+	}
+#endif
+
 	cpuset_cpus_allowed(p, cpus_allowed);
 	cpumask_and(new_mask, in_mask, cpus_allowed);
 
@@ -9263,6 +9277,12 @@ void sched_exit(struct task_struct *p)
 
 __read_mostly bool sched_predl = 1;
 
+#ifdef CONFIG_SIMPLE_FAS
+inline bool is_fas_critical_task(struct task_struct *p)
+{
+	return p && p->fas_critical_task;
+}
+#endif
 #if IS_ENABLED(CONFIG_MIHW)
 inline bool is_critical_task(struct task_struct *p)
 {

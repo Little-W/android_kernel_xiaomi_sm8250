@@ -50,7 +50,7 @@
 #include "dsi_display.h"
 #include "dsi_panel.h"
 #endif
-
+#include <linux/frame_monitor.h>
 #define SDE_PSTATES_MAX (SDE_STAGE_MAX * 4)
 #define SDE_MULTIRECT_PLANE_MAX (SDE_STAGE_MAX * 2)
 #define IDLE_TIMEOUT_DEFAULT (1100)
@@ -3332,6 +3332,7 @@ static void sde_crtc_atomic_begin(struct drm_crtc *crtc,
 			(cont_splash_enabled || sde_crtc->enabled))
 		sde_cp_crtc_apply_properties(crtc);
 
+	
 	/*
 	 * PP_DONE irq is only used by command mode for now.
 	 * It is better to request pending before FLUSH and START trigger

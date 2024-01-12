@@ -7185,6 +7185,9 @@ enum fastpaths {
 	NONE = 0,
 	SYNC_WAKEUP,
 	PREV_CPU_FASTPATH,
+#ifdef CONFIG_SIMPLE_FAS
+	FAS_BOOSTED,
+#endif
 #if IS_ENABLED(CONFIG_MIHW)
 	SCHED_BIG_TOP,
 #endif
@@ -7299,7 +7302,6 @@ static void find_best_target(struct sched_domain *sd, cpumask_t *cpus,
 
 			if (fbt_env->skip_cpu == i)
 				continue;
-
 #if IS_ENABLED(CONFIG_PERF_HUMANTASK)
 			if (p->human_task > MAX_LEVER)
 				break;
@@ -8092,6 +8094,16 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 		p->cpus_mask = *cpu_lp_mask;
 	}
 	
+#ifdef CONFIG_SIMPLE_FAS
+	if (p->fas_boosted && cpumask_test_cpu(7, &p->cpus_mask) &&
+		!cpu_isolated(7))
+	{
+		best_energy_cpu = 7;
+		fbt_env.fastpath = FAS_BOOSTED;
+		goto done;
+	}
+#endif
+
 #if IS_ENABLED(CONFIG_MIHW)
 	if (sched_boost_top_app() && is_top_app(p) && cpu_online(super_big_cpu) &&
 		!cpu_isolated(super_big_cpu) && cpumask_test_cpu(super_big_cpu, &p->cpus_mask)) {
