@@ -7,8 +7,10 @@
 #include <linux/fs.h>
 #include <linux/list.h>
 
+#define IS_JANK 1
+#define IS_FLUID 2
 typedef void (*hwui_frame_handler)
-        (int ui_frame_time, ktime_t cur_time);
+        (int ui_frame_time, ktime_t cur_time, u8 mode);
 
 struct hwui_mon_receiver {
 	struct list_head list;
@@ -18,8 +20,7 @@ struct hwui_mon_receiver {
 	 * You MUST NOT do heavy jobs in it, otherwise it'll
 	 * block the UI thread and lead to extra janks.
 	 */
-	hwui_frame_handler jank_callback;
-	hwui_frame_handler fluid_callback;
+	hwui_frame_handler callback_handler;
 };
 
 void hwui_mon_handle_exec(struct filename *);
