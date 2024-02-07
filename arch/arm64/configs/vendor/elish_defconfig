@@ -781,3 +781,8 @@ CONFIG_UFS3V1=y
 
 # Add back binfmt misc feature
 CONFIG_BINFMT_MISC=y
+
+# Add docker support
+CONFIG_DOCKER=y
+CONFIG_DOCKER_SWAP=y
+# CONFIG_ANDROID_PARANOID_NETWORK is not set
