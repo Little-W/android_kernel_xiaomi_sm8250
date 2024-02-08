@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2018-2020 The Linux Foundation. All rights reserved.
  * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
  */
 
 #define pr_fmt(fmt)	"FG: %s: " fmt, __func__
@@ -358,7 +359,7 @@ struct bias_config {
 	int	bias_kohms;
 };
 
-static int fg_gen4_debug_mask = 0;
+static int fg_gen4_debug_mask = FG_STATUS | FG_FVSS | FG_POWER_SUPPLY;
 
 static bool is_batt_vendor_gyb;
 static bool is_batt_vendor_nvt;
@@ -4729,7 +4730,6 @@ static void status_change_work(struct work_struct *work)
 	}
 
 	input_present = is_input_present(fg);
-	fg->input_present = input_present;
 	qnovo_en = is_qnovo_en(fg);
 	cycle_count_update(chip->counter, (u32)batt_soc >> 24,
 		fg->charge_status, fg->charge_done, input_present);
@@ -5406,6 +5406,7 @@ static int fg_psy_set_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
+/*
 		if (chip->cl->active) {
 			pr_warn("Capacity learning active!\n");
 			return 0;
@@ -5414,6 +5415,7 @@ static int fg_psy_set_property(struct power_supply *psy,
 			pr_err("charge_full is out of bounds\n");
 			return -EINVAL;
 		}
+*/
 		mutex_lock(&chip->cl->lock);
 		rc = fg_gen4_store_learned_capacity(chip, pval->intval);
 		if (!rc)
@@ -7330,36 +7332,6 @@ static void fg_gen4_cleanup(struct fg_gen4_chip *chip)
 	dev_set_drvdata(fg->dev, NULL);
 }
 
-#define IBAT_OLD_WORD		317
-#define IBAT_OLD_OFFSET		0
-#define BATT_CURRENT_NUMR		488281
-#define BATT_CURRENT_DENR		1000
-int fg_get_batt_isense(struct fg_dev *fg, int *val)
-{
-	int rc;
-	u8 buf[2];
-	int64_t temp = 0;
-
-	rc = fg_sram_read(fg, IBAT_OLD_WORD, IBAT_OLD_OFFSET, buf, 2,
-			FG_IMA_DEFAULT);
-	if (rc < 0) {
-		pr_err("Error in reading %04x[%d] rc=%d\n", IBAT_OLD_WORD,
-				IBAT_OLD_OFFSET, rc);
-		return rc;
-	}
-
-	temp = buf[0] | buf[1] << 8;
-
-	/* Sign bit is bit 15 */
-	temp = sign_extend32(temp, 15);
-	*val = div_s64((s64)temp * BATT_CURRENT_NUMR, BATT_CURRENT_DENR);
-	pr_info("read batt isense: %d[%d]%d\n",
-			(*val)/10, *val, (*val)/1000);
-
-	return 0;
-}
-
-
 static void fg_gen4_post_init(struct fg_gen4_chip *chip)
 {
 	int i;
@@ -7745,9 +7717,6 @@ static int fg_gen4_resume(struct device *dev)
 {
 	struct fg_gen4_chip *chip = dev_get_drvdata(dev);
 	struct fg_dev *fg = &chip->fg;
-	int val = 0;
-	if (!fg->input_present)
-	fg_get_batt_isense(fg, &val);
 
 	schedule_delayed_work(&chip->ttf->ttf_work, 0);
 	if (fg_sram_dump)
