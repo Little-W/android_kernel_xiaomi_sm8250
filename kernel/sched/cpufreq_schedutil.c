@@ -465,7 +465,7 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 				policy->cpuinfo.max_freq : policy->cur;
 
 #if IS_ENABLED(CONFIG_PACKAGE_RUNTIME_INFO)
-	walt_freq = map_util_freq(util, freq, max);
+	walt_freq = map_util_freq(util, freq, max, policy->cpu);
 	freq = glk_cal_freq(policy, util, max);
 	if (!freq)
 		freq = glk_freq_limit(policy, &walt_freq);
