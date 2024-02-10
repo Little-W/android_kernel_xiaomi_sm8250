@@ -208,7 +208,7 @@ static void cam_reclaim_thread_affinity(struct task_struct *task)
 #if(LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0))
 	if (!cpumask_equal(newmask, &task->cpus_mask)) {
 #else
-	if (!cpumask_equal(newmask, &task->cpus_allowed)) {
+	if (!cpumask_equal(newmask, &task->cpus_mask)) {
 #endif
 		cpumask_t cpumask_temp;
 		cpumask_and(&cpumask_temp, newmask, cpu_online_mask);
