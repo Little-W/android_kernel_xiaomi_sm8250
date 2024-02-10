@@ -41,7 +41,7 @@ static struct {
 	loff_t inject2_offset;
 } hwui_info[] = {
 // Here, record info to support different versions of libhwui.so.
-#define INFO_COUNT 2
+#define INFO_COUNT 15
 	{
 		.checksum = "dea5f6def7787d5c89fe66e7f888455953fd8880",
 		.inject1_offset = 0x26868C,
@@ -53,7 +53,85 @@ static struct {
 		.inject1_offset = 0x2AF62C,
 		.reg = 4,
 		.inject2_offset = 0x2AF640
-	}
+	},
+	{
+		.checksum = "62bb9d668f86e9b121a52e4038bf0d4f47575fcf",
+		.inject1_offset = 0x2AFE24,
+		.reg = 4,
+		.inject2_offset = 0x2AFE38
+	},
+	{
+		.checksum = "16c1f2ff55863d825aae2f045086c161ee0f5371",
+		.inject1_offset = 0x2B00C8,
+		.reg = 4,
+		.inject2_offset = 0x2B00DC
+	},
+	{
+		.checksum = "a32b7c6ee142007e32c26b66d1ed7a2941de7a54",
+		.inject1_offset = 0x4EA830,
+		.reg = 4,
+		.inject2_offset = 0x4EA848
+	},
+	{
+		.checksum = "acdff8d46934e39c10a72ace0fb887e525282d76",
+		.inject1_offset = 0x2AFC9C,
+		.reg = 4,
+		.inject2_offset = 0x2AFCB0
+	},
+	{
+		.checksum = "cd23f47cd5c0cf5ce5fb1fbfe6938242b4626f8d",
+		.inject1_offset = 0x2AFF44,
+		.reg = 4,
+		.inject2_offset = 0x2AFF58
+	},
+	{
+		.checksum = "69c14ea170d5076bd4f7dbc33b067ccc4f4814c3",
+		.inject1_offset = 0x2AFEB0,
+		.reg = 4,
+		.inject2_offset = 0x2AFEC4
+	},
+	{
+		.checksum = "903cd9a5add03c1c091f5e82f608feabdab93203",
+		.inject1_offset = 0x2B015C,
+		.reg = 4,
+		.inject2_offset = 0x2B0170
+	},
+	{
+		.checksum = "42a8e884a891dbc3569d5663874c5f119009dc8b",
+		.inject1_offset = 0x2AFF48,
+		.reg = 4,
+		.inject2_offset = 0x2AFF5C
+	},
+	{
+		.checksum = "b1e4e220c085e5ed2d87943e8105198f13e034c9",
+		.inject1_offset = 0x2B0018,
+		.reg = 4,
+		.inject2_offset = 0x2B002C
+	},
+	{
+		.checksum = "f38c537885d728d8b8581cae531db722d47f856f",
+		.inject1_offset = 0x2B0018,
+		.reg = 4,
+		.inject2_offset = 0x2B002C
+	},
+	{
+		.checksum = "2291466e9189a6d259dd4e2e5519b12c6d78e74f",
+		.inject1_offset = 0x2B0018,
+		.reg = 4,
+		.inject2_offset = 0x2B0028
+	},
+	{
+		.checksum = "5ad66c7a357cfdab94bb0fd5e51b742ea0eb4c90",
+		.inject1_offset = 0x2B0570,
+		.reg = 4,
+		.inject2_offset = 0x2B0588
+	},
+	{
+		.checksum = "0466893a83e896b00bcd24b4ade6873ab2791c74",
+		.inject1_offset = 0x2B07F0,
+		.reg = 4,
+		.inject2_offset = 0x2B0804
+	}		
 };
 
 static int hwui_index;
