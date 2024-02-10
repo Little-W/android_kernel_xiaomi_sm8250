@@ -6780,7 +6780,7 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int t
 	for_each_cpu_wrap(cpu, sched_domain_span(sd), target) {
 		if (!--nr)
 			return -1;
-		if (!cpumask_test_cpu(cpu, &p->cpus_allowed))
+		if (!cpumask_test_cpu(cpu, &p->cpus_mask))
 			continue;
 		if (cpu_isolated(cpu))
 			continue;
@@ -6869,10 +6869,10 @@ static inline int select_idle_sibling_cstate_aware(struct task_struct *p,
 		sg = sd->groups;
 		do {
 			if (!cpumask_intersects(sched_group_span(sg),
-						&p->cpus_allowed))
+						&p->cpus_mask))
 				goto next;
 
-			for_each_cpu_and(i, &p->cpus_allowed,
+			for_each_cpu_and(i, &p->cpus_mask,
 					  sched_group_span(sg)) {
 				int idle_idx;
 				unsigned long new_usage;
@@ -8055,20 +8055,20 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 		goto done;
 #endif
 
-	if(!cpumask_test_cpu(7, &p->cpus_allowed) && kp_active_mode()==4)
+	if(!cpumask_test_cpu(7, &p->cpus_mask) && kp_active_mode()==4)
 	{
-		p->cpus_allowed = *cpu_lp_mask;
+		p->cpus_mask = *cpu_lp_mask;
 	}
 	
 #if IS_ENABLED(CONFIG_MIHW)
 	if (sched_boost_top_app() && is_top_app(p) && cpu_online(super_big_cpu) &&
-		!cpu_isolated(super_big_cpu) && cpumask_test_cpu(super_big_cpu, &p->cpus_allowed)) {
+		!cpu_isolated(super_big_cpu) && cpumask_test_cpu(super_big_cpu, &p->cpus_mask)) {
 		best_energy_cpu = super_big_cpu;
 		fbt_env.fastpath = SCHED_BIG_TOP;
 		goto done;
 	}
 	else if(is_top_app(p) && cpu_online(hp_cpu_1) && 
-		!cpu_isolated(hp_cpu_1) && cpumask_test_cpu(hp_cpu_1, &p->cpus_allowed)){
+		!cpu_isolated(hp_cpu_1) && cpumask_test_cpu(hp_cpu_1, &p->cpus_mask)){
 			best_energy_cpu = hp_cpu_1;
 			fbt_env.fastpath = PREV_CPU_FASTPATH;
 			goto done;

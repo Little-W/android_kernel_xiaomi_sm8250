@@ -994,7 +994,7 @@ static int exec_buckets_show(struct seq_file *m, void *v)
 
 			if (p->pkg.migt.flag & MINOR_TASK)
 				flag3 = 1;
-			if (!cpumask_test_cpu(4, &p->cpus_allowed))
+			if (!cpumask_test_cpu(4, &p->cpus_mask))
 				flag = 1;
 			if (!cpumask_test_cpu(4, &p->pkg.migt.cpus_allowed))
 				flag2 = 1;
