@@ -81,7 +81,7 @@ config DOCKER
 	select MEMCG_KMEM
         select NETFILTER_XT_MATCH_IPVS
         select IP_VS_RR
-        select SECURITY_APPARMOR
+#        select SECURITY_APPARMOR
 	select VLAN_8021Q
         select BRIDGE_VLAN_FILTERING
         #select IP6_NF_TARGET_MASQUERADE
