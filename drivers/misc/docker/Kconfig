@@ -135,7 +135,7 @@ config DOCKER_SECURE_NETWORKS
 
 config DOCKER_AUFS
 	bool "Use aufs"
-	default y if DOCKER
+	default n if DOCKER
 	depends on DOCKER
 	help
 		Yes if you are using aufs
