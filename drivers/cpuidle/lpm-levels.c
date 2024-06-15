@@ -97,7 +97,7 @@ module_param_named(print_parsed_dt, print_parsed_dt, bool, 0664);
 static bool sleep_disabled;
 module_param_named(sleep_disabled, sleep_disabled, bool, 0664);
 
-#ifdef CONFIG_MIHW
+#ifdef XIAOMI_MIUI
 static bool sleep_disabled_dev;
 module_param_named(sleep_disabled_dev, sleep_disabled_dev, bool, 0664);
 #endif
@@ -123,7 +123,7 @@ uint32_t register_system_pm_ops(struct system_pm_ops *pm_ops)
 	return 0;
 }
 
-#ifdef CONFIG_MIHW
+#ifdef XIAOMI_MIUI
 /**
  * device type for disable lpm
  *   type     event    bitmap

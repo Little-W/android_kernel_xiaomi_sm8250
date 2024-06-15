@@ -58,7 +58,7 @@
 #define MI_DRM_NOTIFIER
 
 #define NVT_DEBUG 0
-#ifdef CONFIG_MIHW
+#ifdef XIAOMI_MIUI
 #define TOUCH_DISABLE_LPM 1
 #define TOUCH_IRQ_BOOST 2
 #else
