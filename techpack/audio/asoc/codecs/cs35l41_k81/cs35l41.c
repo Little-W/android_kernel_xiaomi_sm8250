@@ -11,7 +11,6 @@
  * published by the Free Software Foundation.
  *
  */
-#define DEBUG
 
 //#define BRINGUP_IRQ_VERIFY
 #define FAST_SWITCH_WORKAROUND
@@ -48,7 +47,7 @@
 
 #include "wm_adsp.h"
 #include "cs35l41.h"
-#include <sound/cs35l41_v2.h>
+#include <sound/cs35l41_k81.h>
 
 static const char * const cs35l41_supplies[] = {
 	"VA",
@@ -1441,6 +1440,9 @@ static const struct snd_kcontrol_new cs35l41_aud_controls[] = {
 	SOC_SINGLE("VPBR Config", CS35L41_VPBR_CFG, 0, 0x7FFFFFF, 0),
 	SOC_SINGLE("Noise Gate Config", CS35L41_NG_CFG, 0, 0x3FFF, 0),
 	SOC_SINGLE("GLOBAL_EN from GPIO Control", CS35L41_PWR_CTRL1, 8, 1, 0),
+#if defined(AUDIO_SMART_PA_STANDBY_SUPPORT)
+	SOC_SINGLE("GLOBAL_EN Control", CS35L41_PWR_CTRL1, 0, 1, 0), // for pa standby
+#endif
 	SOC_SINGLE("Boost Converter Enable", CS35L41_PWR_CTRL2, 4, 3, 0),
 	SOC_SINGLE("AMP Enable", CS35L41_PWR_CTRL2, 0, 1, 0),
 	WM_ADSP_FW_CONTROL("DSP1", 0),
@@ -1916,13 +1918,12 @@ static int cs35l41_main_amp_event(struct snd_soc_dapm_widget *w,
 
 			pdn = false;
 			for (i = 0; i < 100; i++) {
-			regmap_read(cs35l41->regmap, CS35L41_IRQ1_STATUS1,
-					&val);
-				if (val & CS35L41_PDN_DONE_MASK) {
-					pdn = true;
-					break;
-				}
-				usleep_range(1000, 1010);
+				regmap_read(cs35l41->regmap, CS35L41_IRQ1_STATUS1, &val);
+					if (val & CS35L41_PDN_DONE_MASK) {
+						pdn = true;
+						break;
+					}
+					usleep_range(1000, 1010);
 			}
 
 			if (!pdn)
@@ -2263,6 +2264,8 @@ static int cs35l41_pcm_hw_params(struct snd_pcm_substream *substream,
 
 #if defined(CONFIG_TARGET_PRODUCT_ENUMA) || defined(CONFIG_TARGET_PRODUCT_ELISH)
 	cs35l41_component_set_sysclk(dai->component, 0, 0, 8 * rate * asp_width, 0);
+#elif defined(CONFIG_TARGET_PRODUCT_DAGU)
+	cs35l41_component_set_sysclk(dai->component, 0, 0, 4 * rate * asp_width, 0);
 #else
 	cs35l41_component_set_sysclk(dai->component, 0, 0, 2 * rate * asp_width, 0);
 #endif
@@ -2329,7 +2332,7 @@ static int cs35l41_pcm_startup(struct snd_pcm_substream *substream,
 			snd_soc_component_get_drvdata(dai->component);
 	
 	dev_dbg(cs35l41->dev, "%s\n", __func__);
-#if defined(CONFIG_TARGET_PRODUCT_ENUMA) || defined(CONFIG_TARGET_PRODUCT_ELISH)
+#if defined(CONFIG_TARGET_PRODUCT_ENUMA) || defined(CONFIG_TARGET_PRODUCT_ELISH) || defined(CONFIG_TARGET_PRODUCT_DAGU)
 		cs35l41_set_dai_fmt(dai, SND_SOC_DAIFMT_CBS_CFS|SND_SOC_DAIFMT_DSP_A);
 #else
 		cs35l41_set_dai_fmt(dai, SND_SOC_DAIFMT_CBS_CFS|SND_SOC_DAIFMT_I2S);
@@ -2769,9 +2772,13 @@ static int cs35l41_component_probe(struct snd_soc_component *component)
 		if (ret < 0)
 			dev_err(cs35l41->dev,
 			       "snd_soc_add_codec_controls failed (%d)\n", ret);
+
+		dev_dbg(cs35l41->dev, "queue boot_work\n");
+		queue_work(cs35l41->dsp.work_queue, &cs35l41->dsp.boot_work);
 		kfree(kcontrol);
 	}
 exit:
+        dev_dbg(cs35l41->dev, "cs35l41_component_probe: X\n");
 	return ret;
 }
 
