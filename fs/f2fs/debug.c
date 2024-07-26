@@ -3,7 +3,6 @@
  * f2fs debugging statistics
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
- * Copyright (C) 2021 XiaoMi, Inc.
  *             http://www.samsung.com/
  * Copyright (c) 2012 Linux Foundation
  * Copyright (c) 2012 Greg Kroah-Hartman <gregkh@linuxfoundation.org>
@@ -12,7 +11,6 @@
 #include <linux/fs.h>
 #include <linux/backing-dev.h>
 #include <linux/f2fs_fs.h>
-#include <linux/proc_fs.h>
 #include <linux/blkdev.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
@@ -27,22 +25,6 @@ static DEFINE_RAW_SPINLOCK(f2fs_stat_lock);
 #ifdef CONFIG_DEBUG_FS
 static struct dentry *f2fs_debugfs_root;
 #endif
-extern struct proc_dir_entry *f2fs_proc_root;
-
-const char *f2fs_cp_reasons[NR_CP_REASON_TYPE] = {
-	"no needed",
-	"non regular",
-	"compressed",
-	"hardlink",
-	"sb needs cp",
-	"wrong pino",
-	"no space roll forward",
-	"node needs cp",
-	"fastboot mode",
-	"log type is 2",
-	"dir needs recovery",
-	"parent dir xattr set",
-};
 
 /*
  * This function calculates BDF of every segments
@@ -96,10 +78,6 @@ static void update_general_status(struct f2fs_sb_info *sbi)
 
 		si->hit_cached[i] = atomic64_read(&sbi->read_hit_cached[i]);
 		si->hit_rbtree[i] = atomic64_read(&sbi->read_hit_rbtree[i]);
-	si->sync_file_total = atomic64_read(&sbi->sync_file_count);
-	for (i = 0; i < NR_CP_REASON_TYPE; i++)
-		si->cp_reason_total[i] = atomic64_read(&sbi->cp_reason_count[i]);
-
 		si->total_ext[i] = atomic64_read(&sbi->total_hit_ext[i]);
 		si->hit_total[i] = si->hit_cached[i] + si->hit_rbtree[i];
 		si->ext_tree[i] = atomic_read(&eti->total_ext_tree);
@@ -196,7 +174,6 @@ static void update_general_status(struct f2fs_sb_info *sbi)
 	si->free_nids = NM_I(sbi)->nid_cnt[FREE_NID];
 	si->avail_nids = NM_I(sbi)->available_nids;
 	si->alloc_nids = NM_I(sbi)->nid_cnt[PREALLOC_NID];
-	si->gc_booster = sbi->gc_booster;
 	si->io_skip_bggc = sbi->io_skip_bggc;
 	si->other_skip_bggc = sbi->other_skip_bggc;
 	si->util_free = (int)(free_user_blocks(sbi) >> sbi->log_blocks_per_seg)
@@ -507,8 +484,8 @@ static int stat_show(struct seq_file *s, void *v)
 		seq_printf(s, "  - Total : %4d\n", si->nr_total_ckpt);
 		seq_printf(s, "  - Cur time : %4d(ms)\n", si->cur_ckpt_time);
 		seq_printf(s, "  - Peak time : %4d(ms)\n", si->peak_ckpt_time);
-		seq_printf(s, "GC calls: %d (BG: %d) (Boost: %d)\n",
-			   si->call_count, si->bg_gc, si->gc_booster);
+		seq_printf(s, "GC calls: %d (BG: %d)\n",
+			   si->call_count, si->bg_gc);
 		seq_printf(s, "  - data segments : %d (%d)\n",
 				si->data_segs, si->bg_data_segs);
 		seq_printf(s, "  - node segments : %d (%d)\n",
@@ -717,9 +694,6 @@ void __init f2fs_create_root_stats(void)
 
 void f2fs_destroy_root_stats(void)
 {
-	if (f2fs_proc_root)
-		remove_proc_entry("status", f2fs_proc_root);
-
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(f2fs_debugfs_root);
 	f2fs_debugfs_root = NULL;

@@ -3,7 +3,6 @@
  * fs/f2fs/gc.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
- * Copyright (C) 2021 XiaoMi, Inc.
  *             http://www.samsung.com/
  */
 #include <linux/fs.h>
@@ -29,25 +28,13 @@ static struct kmem_cache *victim_entry_slab;
 static unsigned int count_bits(const unsigned long *addr,
 				unsigned int offset, unsigned int len);
 
-static inline bool should_break_gc(struct f2fs_sb_info *sbi)
-{
-	if (freezing(current) || kthread_should_stop())
-		return true;
-
-	if (sbi->gc_mode == GC_URGENT_HIGH)
-		return false;
-
-	return !is_idle(sbi, GC_TIME);
-}
-
 static int gc_thread_func(void *data)
 {
 	struct f2fs_sb_info *sbi = data;
 	struct f2fs_gc_kthread *gc_th = sbi->gc_thread;
 	wait_queue_head_t *wq = &sbi->gc_thread->gc_wait_queue_head;
 	wait_queue_head_t *fggc_wq = &sbi->gc_thread->fggc_wq;
-	unsigned int wait_ms, gc_count, i;
-	bool boost;
+	unsigned int wait_ms;
 	struct f2fs_gc_control gc_control = {
 		.victim_segno = NULL_SEGNO,
 		.should_migrate_blocks = false,
@@ -96,8 +83,6 @@ static int gc_thread_func(void *data)
 			continue;
 		}
 
-		boost = sbi->gc_booster;
-
 		/*
 		 * [GC triggering condition]
 		 * 0. GC is not conducted currently.
@@ -133,35 +118,19 @@ static int gc_thread_func(void *data)
 			goto next;
 		}
 
-		if (boost)
-			calculate_sleep_time(sbi, gc_th, &wait_ms);
-		else {
-			if (has_enough_invalid_blocks(sbi))
-				decrease_sleep_time(gc_th, &wait_ms);
-			else
-				increase_sleep_time(gc_th, &wait_ms);
-		}
+		if (has_enough_invalid_blocks(sbi))
+			decrease_sleep_time(gc_th, &wait_ms);
+		else
+			increase_sleep_time(gc_th, &wait_ms);
 do_gc:
-		gc_count = boost ? get_gc_count(sbi) : 1;
+		if (!foreground)
+			stat_inc_bggc_count(sbi->stat_info);
 
-		for (i = 0; i < gc_count; i++) {
-			/*
-			 * f2fs_gc will release gc_lock before return,
-			 * so we need to relock it before calling f2fs_gc.
-			 */
-			if (i && !f2fs_down_write_trylock(&sbi->gc_lock)) {
-				stat_other_skip_bggc_count(sbi);
-				break;
-			}
+		sync_mode = F2FS_OPTION(sbi).bggc_mode == BGGC_MODE_SYNC;
 
-			if (!foreground)
-				stat_inc_bggc_count(sbi->stat_info);
-
-			sync_mode = F2FS_OPTION(sbi).bggc_mode == BGGC_MODE_SYNC;
-
-			/* foreground GC was been triggered via f2fs_balance_fs() */
-			if (foreground)
-				sync_mode = false;
+		/* foreground GC was been triggered via f2fs_balance_fs() */
+		if (foreground)
+			sync_mode = false;
 
 		gc_control.init_gc_type = sync_mode ? FG_GC : BG_GC;
 		gc_control.no_bg_gc = foreground;
@@ -172,21 +141,14 @@ do_gc:
 			/* don't bother wait_ms by foreground gc */
 			if (!foreground)
 				wait_ms = gc_th->no_gc_sleep_time;
-				break;
 		} else {
 			/* reset wait_ms to default sleep time */
 			if (wait_ms == gc_th->no_gc_sleep_time)
 				wait_ms = gc_th->min_sleep_time;
-				break;
 		}
 
-			if (foreground)
-				wake_up_all(&gc_th->fggc_wq);
-
-			if (should_break_gc(sbi))
-				break;
-
-		}
+		if (foreground)
+			wake_up_all(&gc_th->fggc_wq);
 
 		trace_f2fs_background_gc(sbi->sb, wait_ms,
 				prefree_segments(sbi), free_segments(sbi));
@@ -1578,9 +1540,7 @@ next_step:
 
 			inode = f2fs_iget(sb, dni.ino);
 			if (IS_ERR(inode) || is_bad_inode(inode) ||
-					special_file(inode->i_mode)) {
-				set_sbi_flag(sbi, SBI_NEED_FSCK);
-			}
+					special_file(inode->i_mode))
 				continue;
 
 			err = f2fs_gc_pinned_control(inode, gc_type, segno);
