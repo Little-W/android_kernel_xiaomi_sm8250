@@ -3,7 +3,6 @@
  * fs/f2fs/checkpoint.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
- * Copyright (C) 2021 XiaoMi, Inc.
  *             http://www.samsung.com/
  */
 #include <linux/fs.h>
@@ -15,10 +14,6 @@
 #include <linux/pagevec.h>
 #include <linux/swap.h>
 #include <linux/kthread.h>
-
-#if defined(CONFIG_UFSTW) && defined(UFS3V0)
-#include <linux/ufstw.h>
-#endif
 
 #include "f2fs.h"
 #include "node.h"
@@ -331,8 +326,15 @@ static int __f2fs_write_meta_page(struct page *page,
 
 	trace_f2fs_writepage(page, META);
 
-	if (unlikely(f2fs_cp_error(sbi)))
+	if (unlikely(f2fs_cp_error(sbi))) {
+		if (is_sbi_flag_set(sbi, SBI_IS_CLOSE)) {
+			ClearPageUptodate(page);
+			dec_page_count(sbi, F2FS_DIRTY_META);
+			unlock_page(page);
+			return 0;
+		}
 		goto redirty_out;
+	}
 	if (unlikely(is_sbi_flag_set(sbi, SBI_POR_DOING)))
 		goto redirty_out;
 	if (wbc->for_reclaim && page->index < GET_SUM_BLOCK(sbi, 0))
@@ -1311,7 +1313,8 @@ void f2fs_wait_on_all_pages(struct f2fs_sb_info *sbi, int type)
 		if (!get_pages(sbi, type))
 			break;
 
-		if (unlikely(f2fs_cp_error(sbi)))
+		if (unlikely(f2fs_cp_error(sbi) &&
+			!is_sbi_flag_set(sbi, SBI_IS_CLOSE)))
 			break;
 
 		if (type == F2FS_DIRTY_META)
@@ -1654,10 +1657,6 @@ int f2fs_write_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	if (cpc->reason != CP_RESIZE)
 		f2fs_down_write(&sbi->cp_global_sem);
 
-#if defined(CONFIG_UFSTW) && defined(UFS3V0)
-	bdev_set_turbo_write(sbi->sb->s_bdev);
-#endif
-
 	if (!is_sbi_flag_set(sbi, SBI_IS_DIRTY) &&
 		((cpc->reason & CP_FASTBOOT) || (cpc->reason & CP_SYNC) ||
 		((cpc->reason & CP_DISCARD) && !sbi->discard_blks)))
@@ -1668,12 +1667,6 @@ int f2fs_write_checkpoint(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	}
 
 	trace_f2fs_write_checkpoint(sbi->sb, cpc->reason, "start block_ops");
-
-	/*
-	 * checkpoint will maintain the xattr consistency of dirs,
-	 * so we can remove them from tracking list when do_checkpoint
-	 */
-	f2fs_clear_xattr_set_ilist(sbi);
 
 	err = block_operations(sbi);
 	if (err)
@@ -1742,9 +1735,6 @@ stop:
 	f2fs_update_time(sbi, CP_TIME);
 	trace_f2fs_write_checkpoint(sbi->sb, cpc->reason, "finish checkpoint");
 out:
-#if defined(CONFIG_UFSTW) && defined(UFS3V0)
-	bdev_clear_turbo_write(sbi->sb->s_bdev);
-#endif
 	if (cpc->reason != CP_RESIZE)
 		f2fs_up_write(&sbi->cp_global_sem);
 	return err;
