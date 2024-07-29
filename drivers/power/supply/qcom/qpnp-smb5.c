@@ -235,26 +235,6 @@ static struct smb_charger *__smbchg;
 
 static int __debug_mask = PR_MISC | PR_WLS | PR_OEM | PR_PARALLEL;
 
-static BLOCKING_NOTIFIER_HEAD(pen_charge_state_notifier_list);
-
-int pen_charge_state_notifier_register_client(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_register(&pen_charge_state_notifier_list, nb);
-}
-EXPORT_SYMBOL(pen_charge_state_notifier_register_client);
-
-int pen_charge_state_notifier_unregister_client(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_unregister(&pen_charge_state_notifier_list, nb);
-}
-EXPORT_SYMBOL(pen_charge_state_notifier_unregister_client);
-
-int pen_charge_state_notifier_call_chain(unsigned long val, void *v)
-{
-	return blocking_notifier_call_chain(&pen_charge_state_notifier_list, val, v);
-}
-EXPORT_SYMBOL(pen_charge_state_notifier_call_chain);
-
 static ssize_t pd_disabled_show(struct device *dev, struct device_attribute
 				*attr, char *buf)
 {
@@ -680,9 +660,6 @@ static int smb5_parse_dt_misc(struct smb5 *chip, struct device_node *node)
 	chg->sw_jeita_enabled = of_property_read_bool(node,
 				"qcom,sw-jeita-enable");
 
-	chg->jeita_arb_enable = of_property_read_bool(node,
-				"qcom,jeita-arb-enable");
-
 	chg->six_pin_step_charge_enable = of_property_read_bool(node,
 				"mi,six-pin-step-chg");
 
@@ -691,6 +668,9 @@ static int smb5_parse_dt_misc(struct smb5 *chip, struct device_node *node)
 
 	chg->support_ffc = of_property_read_bool(node,
 				"mi,support-ffc");
+
+	chg->jeita_arb_enable = of_property_read_bool(node,
+				"qcom,jeita-arb-enable");
 
 	chg->pd_not_supported = chg->pd_not_supported ||
 			of_property_read_bool(node, "qcom,usb-pd-disable");
@@ -1530,14 +1510,7 @@ static int smb5_usb_get_prop(struct power_supply *psy,
 		val->intval = get_client_vote(chg->usb_icl_votable, PD_VOTER);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
-#if IS_ENABLED(CONFIG_BOARD_CAS)
-			val->intval = 12000000;
-#elif IS_ENABLED(CONFIG_BOARD_CMI)
-			val->intval = 10000000;
-#else
-			val->intval = 6000000;
-#endif
-			rc = smblib_get_prop_input_current_max(chg, val);
+		rc = smblib_get_prop_input_current_max(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_TYPE:
 		val->intval = POWER_SUPPLY_TYPE_USB_PD;
@@ -1569,7 +1542,6 @@ static int smb5_usb_get_prop(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_QUICK_CHARGE_TYPE:
 		val->intval = smblib_get_quick_charge_type(chg);
-		pr_err("quick charge type is %d\n", val->intval);
 		break;
 	case POWER_SUPPLY_PROP_TYPEC_MODE:
 		rc = smblib_get_usb_prop_typec_mode(chg, val);
@@ -2566,6 +2538,7 @@ static int smb5_get_prop_reverse_pen_soc(struct smb_charger *chg,
 	return rc;
 }
 
+/*set mode of DIV 2*/
 static int smb5_set_prop_div2_mode(struct smb_charger *chg,
 				const union power_supply_propval *val)
 {
@@ -3550,12 +3523,9 @@ static int smb5_configure_typec(struct smb_charger *chg)
 	}
 
 	/*
-	 * Across reboot, standard typeC cables get detected as legacy cables
-	 * due to VBUS attachment prior to CC attach/dettach. To handle this,
-	 * "early_usb_attach" flag is used, which assumes that across reboot,
-	 * the cable connected can be standard typeC. However, its jurisdiction
-	 * is limited to PD capable designs only. Hence, for non-PD type designs
-	 * reset legacy cable detection by disabling/enabling typeC mode.
+	 * Across reboot, standard typeC cables get detected as legacy
+	 * cables due to VBUS attachment prior to CC attach/detach. Reset
+	 * the legacy detection logic by enabling/disabling the typeC mode.
 	 */
 	if (val & TYPEC_LEGACY_CABLE_STATUS_BIT) {
 		pval.intval = POWER_SUPPLY_TYPEC_PR_NONE;
@@ -5018,6 +4988,7 @@ static int smb5_probe(struct platform_device *pdev)
 	chg->thermal_fcc_override = 0;
 	chg->pd_disabled = 0;
 	chg->apdo_max = 0;
+	chg->quick_charge_type_info = 0;
 	chg->weak_chg_icl_ua = 500000;
 	chg->mode = PARALLEL_MASTER;
 	chg->irq_info = smb5_irqs;
